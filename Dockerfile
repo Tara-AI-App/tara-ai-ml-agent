@@ -29,9 +29,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py .
 
 # Create a non-root user but add to docker group for Docker socket access
-# Use GID 999 which is commonly used for docker group on Linux systems
+# Check if docker group exists, if not create it with the host's docker GID (994)
 RUN groupadd -r appuser && useradd -r -g appuser appuser
-RUN groupadd -g 999 docker || groupmod -g 999 docker
+RUN if ! getent group docker > /dev/null 2>&1; then \
+        groupadd -g 994 docker; \
+    fi
 RUN usermod -aG docker appuser
 
 # Change ownership of the app directory
