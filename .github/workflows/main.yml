@@ -26,6 +26,7 @@ jobs:
       with:
         instance_name: 'tara-vm'
         zone: 'us-central1-a'
+        user: 'qais_jabbar'
         ssh_private_key: '${{ secrets.GCP_SSH_PRIVATE_KEY }}'
         command: |
           sudo su -c "
