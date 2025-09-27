@@ -6,3 +6,6 @@ pandas
 tabulate
 tqdm
 scikit-learn
+fastapi
+uvicorn
+pydantic

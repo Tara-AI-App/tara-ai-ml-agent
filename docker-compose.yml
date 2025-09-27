@@ -1,0 +1,28 @@
+# Docker compose file for Linux/Debian deployment
+version: '3.8'
+
+services:
+  course-agent-api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount Docker socket to allow container to run other containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - PYTHONUNBUFFERED=1
+    # On Linux, use the appuser with proper docker group permissions
+    # user: "1000:999"  # Uncomment if needed, adjust UIDs as necessary
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - course-agent-network
+
+networks:
+  course-agent-network:
+    driver: bridge
