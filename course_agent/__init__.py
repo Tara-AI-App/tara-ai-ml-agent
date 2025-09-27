@@ -1,9 +1,9 @@
 """
-Course Generator Agent Package
-Following Google ADK structure
+Course Generator Agent Package with Source Tracking
 """
 
-from .agent import root_agent, interactive_course_agent
+from .agent import course_generator, root_agent
 from .config import config
+from .source_tracker import SourceTracker
 
-__all__ = ["root_agent", "interactive_course_agent", "config"]
+__all__ = ["course_generator", "root_agent", "config", "SourceTracker"]
