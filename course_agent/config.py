@@ -25,7 +25,7 @@ class CourseConfiguration:
         max_lessons_per_module (int): Maximum lessons per module.
     """
 
-    critic_model: str = "gemini-2.5-pro"
+    critic_model: str = "gemini-2.5-flash"
     worker_model: str = "gemini-2.5-flash"
     max_modules: int = 8
     max_lessons_per_module: int = 6
