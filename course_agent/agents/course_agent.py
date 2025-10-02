@@ -29,7 +29,20 @@ from ..core.enhanced_source_tracker import EnhancedSourceTracker
 class CourseGenerationAgent:
     """Main course generation agent with modular architecture."""
 
-    def __init__(self):
+    def __init__(self, github_token: str = None, drive_token: str = None):
+        """
+        Initialize the course generation agent.
+
+        Args:
+            github_token: GitHub personal access token (overrides env var)
+            drive_token: Google Drive token (for future use)
+        """
+        # Set tokens in environment if provided
+        if github_token:
+            os.environ['GITHUB_PERSONAL_ACCESS_TOKEN'] = github_token
+        if drive_token:
+            os.environ['GOOGLE_DRIVE_TOKEN'] = drive_token
+
         self.settings = settings
         self.source_manager = SourceManager()
         self.source_tracker = EnhancedSourceTracker()
@@ -395,8 +408,14 @@ class CourseGenerationAgent:
 
 
 # Create the main agent instance
-def create_course_agent() -> CourseGenerationAgent:
-    """Factory function to create a configured course generation agent."""
-    agent = CourseGenerationAgent()
+def create_course_agent(github_token: str = None, drive_token: str = None) -> CourseGenerationAgent:
+    """
+    Factory function to create a configured course generation agent.
+
+    Args:
+        github_token: GitHub personal access token (overrides env var)
+        drive_token: Google Drive token (for future use)
+    """
+    agent = CourseGenerationAgent(github_token=github_token, drive_token=drive_token)
     logger.info(f"Course generation agent created: {agent.get_configuration_status()}")
     return agent

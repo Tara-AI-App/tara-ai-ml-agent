@@ -39,7 +39,7 @@ class MCPConfig:
 @dataclass
 class RAGConfig:
     """Configuration for RAG processing."""
-    max_results: int = 5
+    max_results: int = 2  # Reduced from 5 to avoid token limit
     relevance_threshold: float = 0.7
     chunk_size: int = 1000
     chunk_overlap: int = 200
