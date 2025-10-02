@@ -26,7 +26,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY main.py .
+COPY . .
 
 # Create a non-root user but add to docker group for Docker socket access
 # Check if docker group exists, if not create it with the host's docker GID (994)

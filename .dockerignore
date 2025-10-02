@@ -48,6 +48,3 @@ README.md
 Dockerfile
 docker-compose.yml
 .dockerignore
-
-# Course agent (as mentioned, your friend will work on this)
-course_agent/
