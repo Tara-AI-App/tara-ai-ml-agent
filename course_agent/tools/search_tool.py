@@ -4,7 +4,9 @@ Google Search tool implementation for course content discovery.
 from typing import List, Dict, Any
 from google.adk.agents import Agent
 from google.adk.tools import google_search
-from google.adk.tools.agent_tool import AgentTool
+from google.adk.runners import InMemoryRunner
+from google.genai import types
+import uuid
 
 from .base import ContentSource, SourceResult, SourceType, SearchQuery
 from ..config.settings import settings
@@ -39,8 +41,8 @@ class GoogleSearchTool(ContentSource):
             tools=[google_search],
         )
 
-        # Convert agent to tool for integration
-        self.search_tool = AgentTool(self.search_agent)
+        # Create runner for executing the search agent
+        self.runner = InMemoryRunner(agent=self.search_agent)
 
     async def search(self, query: SearchQuery) -> List[SourceResult]:
         """Search using Google Search for educational content."""
@@ -58,8 +60,8 @@ class GoogleSearchTool(ContentSource):
             Focus on tutorials, documentation, examples, and guides.
             """
 
-            # Execute search through the agent
-            search_results = self.search_tool.invoke(search_prompt)
+            # Execute search through the runner
+            search_results = await self._run_search_agent(search_prompt)
 
             # Parse and convert results to SourceResult format
             source_results = self._parse_search_results(search_results, query.query)
@@ -70,6 +72,45 @@ class GoogleSearchTool(ContentSource):
         except Exception as e:
             logger.error(f"Google search failed: {e}")
             return []
+
+    async def _run_search_agent(self, prompt: str) -> str:
+        """Run the search agent with the given prompt."""
+        try:
+            # Generate IDs
+            user_id = str(uuid.uuid4())
+            session_id = str(uuid.uuid4())
+
+            # Create session
+            await self.runner.session_service.create_session(
+                user_id=user_id,
+                session_id=session_id,
+                app_name=self.runner.app_name
+            )
+
+            # Create user message
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part(text=prompt)]
+            )
+
+            # Run agent and collect response
+            response_text = ""
+            async for event in self.runner.run_async(
+                user_id=user_id,
+                session_id=session_id,
+                new_message=new_message
+            ):
+                if hasattr(event, 'content') and event.content:
+                    if hasattr(event.content, 'parts'):
+                        for part in event.content.parts:
+                            if hasattr(part, 'text') and part.text:
+                                response_text += part.text
+
+            return response_text
+
+        except Exception as e:
+            logger.error(f"Search agent execution failed: {e}")
+            return ""
 
     def _enhance_search_query(self, query: str) -> str:
         """Enhance search query for better educational content discovery."""

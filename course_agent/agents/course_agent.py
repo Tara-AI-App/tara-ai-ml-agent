@@ -166,8 +166,29 @@ class CourseGenerationAgent:
         - Estimated duration: {self.settings.course.default_duration}
         - Default difficulty: {self.settings.course.default_difficulty}
 
-        **OUTPUT FORMAT:**
-        Generate a comprehensive course in JSON format with:
+        **OUTPUT FORMAT - CRITICAL:**
+        You MUST return ONLY valid JSON. Do NOT include any explanatory text before or after the JSON.
+        Do NOT wrap the JSON in markdown code blocks (no ```json or ```).
+        Return the raw JSON object directly starting with {{ and ending with }}.
+
+        **JSON VALIDATION RULES - MUST FOLLOW:**
+        1. All strings MUST be properly quoted with double quotes (not single quotes)
+        2. All property names MUST be in double quotes
+        3. Do NOT use trailing commas (remove comma after last item in arrays/objects)
+        4. Properly escape ALL special characters in string values:
+           - Newlines in markdown: Use literal \\n (double backslash + n)
+           - Tabs: Use \\t (not \t)
+           - Backslashes: Use \\\\ (four backslashes to get one)
+           - Double quotes inside strings: Use \\" (backslash quote)
+           - Example: "content": "# Title\\n\\nThis is text with \\"quotes\\" and code:\\n```python\\nprint('hello')\\n```"
+        5. Numbers (estimated_duration, index) must be plain numbers without quotes
+        6. Booleans must be true/false (lowercase, no quotes)
+        7. Arrays must use square brackets: []
+        8. Objects must use curly braces: {{}}
+        9. Ensure ALL brackets and braces are properly closed
+        10. Test your JSON is valid before returning it
+
+        Generate a comprehensive course in this EXACT JSON format:
         {{
             "title": "Descriptive Course Title",
             "description": "Course overview based on discovered content",

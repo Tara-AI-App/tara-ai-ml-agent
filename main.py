@@ -68,27 +68,62 @@ class CourseResponse(BaseModel):
     difficulty: str
     skills: List[str]
 
+def repair_json_string(json_str: str) -> str:
+    """
+    Attempt to repair common JSON issues.
+    """
+    # Remove trailing commas before } or ]
+    json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+
+    # Remove any text before first { and after last }
+    start = json_str.find('{')
+    end = json_str.rfind('}')
+    if start != -1 and end != -1:
+        json_str = json_str[start:end+1]
+
+    return json_str
+
 def extract_json_from_text(text: str) -> Dict[str, Any]:
     """
-    Extract JSON from agent response text.
-
-    The agent may return JSON wrapped in markdown code blocks or mixed with other text.
-    This function attempts to extract and parse the JSON.
+    Extract JSON from agent response text with multiple fallback strategies.
     """
-    # Try to find JSON in markdown code blocks first
-    json_block_pattern = r'```json\s*(\{.*?\})\s*```'
+    if not text or text.strip() == "":
+        raise ValueError("Empty response from agent")
+
+    def try_parse_json(json_str: str) -> Dict[str, Any]:
+        """Try to parse JSON with repair attempts."""
+        # First try direct parse
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            # Try with repairs
+            try:
+                repaired = repair_json_string(json_str)
+                return json.loads(repaired)
+            except json.JSONDecodeError as e:
+                raise e
+
+    # Strategy 1: Try to find JSON in markdown code blocks with ```json
+    json_block_pattern = r'```json\s*(\{.*\})\s*```'
     match = re.search(json_block_pattern, text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError as e:
-            print(f"⚠️  JSON in code block failed to parse: {e}")
+            return try_parse_json(match.group(1))
+        except json.JSONDecodeError:
+            pass
 
-    # Try to find raw JSON object (greedy, may be incomplete)
-    # Find the first { and try to find matching }
+    # Strategy 2: Try to find JSON in code blocks with ```
+    code_block_pattern = r'```\s*(\{.*\})\s*```'
+    match = re.search(code_block_pattern, text, re.DOTALL)
+    if match:
+        try:
+            return try_parse_json(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: Try to find raw JSON object with brace matching
     start_idx = text.find('{')
     if start_idx != -1:
-        # Try to find the matching closing brace
         brace_count = 0
         in_string = False
         escape_next = False
@@ -117,18 +152,20 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
                         # Found matching closing brace
                         json_str = text[start_idx:i+1]
                         try:
-                            return json.loads(json_str)
-                        except json.JSONDecodeError as e:
-                            print(f"⚠️  Extracted JSON failed to parse: {e}")
-                            # Try without trailing characters
+                            return try_parse_json(json_str)
+                        except json.JSONDecodeError:
+                            # Continue to try other strategies
                             break
 
-    # Try parsing the entire text as JSON
+    # Strategy 4: Try parsing the entire text as JSON
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        print(f"⚠️  Full text JSON parse failed: {e}")
-        raise ValueError("Could not extract valid JSON from agent response")
+        return try_parse_json(text)
+    except json.JSONDecodeError:
+        # Strategy 5: Strip whitespace and try again
+        try:
+            return try_parse_json(text.strip())
+        except json.JSONDecodeError:
+            raise ValueError("Could not extract valid JSON from agent response")
 
 
 async def _run_agent_with_tools_async(agent, prompt: str) -> str:
@@ -215,29 +252,53 @@ async def generate_course(request: CourseRequest):
             raise ValueError("Agent returned empty response. Check that GOOGLE_CLOUD_PROJECT is set correctly.")
 
         # Try to extract JSON from the response
-        course_json = extract_json_from_text(response_text)
+        try:
+            course_json = extract_json_from_text(response_text)
+        except ValueError as e:
+            # Log the actual response for debugging
+            print(f"❌ Failed to extract JSON. Response length: {len(response_text)} chars")
+            print(f"📄 First 1000 chars:\n{response_text[:1000]}\n")
+            print(f"📄 Last 500 chars:\n{response_text[-500:]}\n")
+            raise e
+
+        # Validate required top-level fields
+        required_fields = ['title', 'description', 'difficulty', 'learning_objectives', 'modules', 'source_from']
+        missing_fields = [f for f in required_fields if f not in course_json]
+        if missing_fields:
+            raise ValueError(f"Agent response missing required fields: {missing_fields}")
+
+        # Ensure modules is a list
+        if not isinstance(course_json.get('modules'), list):
+            raise ValueError("'modules' must be a list")
 
         # Fix schema issues
-        # 1. Fix estimated_duration if it's a string
-        if isinstance(course_json.get('estimated_duration'), str):
+        # 1. Fix estimated_duration if it's a string or missing
+        if 'estimated_duration' not in course_json:
+            course_json['estimated_duration'] = 10
+        elif isinstance(course_json.get('estimated_duration'), str):
             duration_str = course_json['estimated_duration']
             # Extract number from string like "10 hours" or "8-12 hours"
-            import re
             match = re.search(r'(\d+)', duration_str)
             if match:
                 course_json['estimated_duration'] = int(match.group(1))
             else:
-                course_json['estimated_duration'] = 8  # Default
+                course_json['estimated_duration'] = 10  # Default
 
         # 2. Add missing index fields to modules and lessons
         if 'modules' in course_json:
             for mod_idx, module in enumerate(course_json['modules'], 1):
                 if 'index' not in module:
                     module['index'] = mod_idx
-                if 'lessons' in module:
+
+                # Ensure lessons exists
+                if 'lessons' not in module:
+                    module['lessons'] = []
+
+                if 'lessons' in module and isinstance(module['lessons'], list):
                     for lesson_idx, lesson in enumerate(module['lessons'], 1):
                         if 'index' not in lesson:
                             lesson['index'] = lesson_idx
+
                 # Ensure quiz field exists (default to empty list if not provided)
                 if 'quiz' not in module:
                     module['quiz'] = []
@@ -245,6 +306,14 @@ async def generate_course(request: CourseRequest):
         # 3. Ensure skills field exists (default to empty list if not provided)
         if 'skills' not in course_json:
             course_json['skills'] = []
+
+        # 4. Ensure source_from is a list
+        if not isinstance(course_json.get('source_from'), list):
+            course_json['source_from'] = []
+
+        # 5. Ensure learning_objectives is a list
+        if not isinstance(course_json.get('learning_objectives'), list):
+            course_json['learning_objectives'] = []
 
         # Validate and return the course
         return CourseResponse(**course_json)
