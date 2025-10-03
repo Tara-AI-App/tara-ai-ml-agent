@@ -46,6 +46,11 @@ class CourseAgentLogger:
         # Prevent propagation to root logger
         self._logger.propagate = False
 
+        # Suppress ADK warnings
+        logging.getLogger('google_adk.google.adk.tools.base_authenticated_tool').setLevel(logging.ERROR)
+        logging.getLogger('google.adk').setLevel(logging.ERROR)
+        logging.getLogger('google_adk').setLevel(logging.ERROR)
+
     def debug(self, message: str, **kwargs):
         """Log debug message."""
         self._logger.debug(message, **kwargs)
