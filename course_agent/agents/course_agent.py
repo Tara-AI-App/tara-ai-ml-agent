@@ -172,22 +172,49 @@ class CourseGenerationAgent:
             "title": "Descriptive Course Title",
             "description": "Course overview based on discovered content",
             "difficulty": "Beginner|Intermediate|Advanced",
-            "estimated_duration": "X hours",
+            "estimated_duration": 10,
             "learning_objectives": ["objective1", "objective2", ...],
+            "skills": ["skill1", "skill2", "skill3", ...],
             "modules": [
                 {{
                     "title": "Module Title",
+                    "index": 1,
                     "lessons": [
                         {{
                             "title": "Lesson Title",
+                            "index": 1,
                             "content": "# Lesson Title\\n\\n## Real Example\\n\\nFrom: https://github.com/owner/repo/blob/main/path/file.py\\n\\n```language\\n// Actual code from repository\\nreal_code_here()\\n```\\n\\n**Explanation**: This code from [repository name] demonstrates..."
+                        }}
+                    ],
+                    "quiz": [
+                        {{
+                            "question": "What is the main purpose of...?",
+                            "choices": {{
+                                "A": "First option",
+                                "B": "Second option",
+                                "C": "Third option",
+                                "D": "Fourth option (optional)"
+                            }},
+                            "answer": "B"
                         }}
                     ]
                 }}
             ],
-            "source_from": ["https://github.com/owner/repo", "internal/path.md"],
-            "source_tracking": {{...}}
+            "source_from": ["https://github.com/owner/repo", "internal/path.md"]
         }}
+
+        **QUIZ REQUIREMENTS:**
+        - Each module must have 2-4 quiz questions
+        - Quiz questions should test understanding of key concepts from the module
+        - Provide 3-4 answer choices (A, B, C, and optionally D)
+        - Mark the correct answer with the letter (A/B/C/D)
+        - Make questions specific to the content, not generic
+
+        **SKILLS EXTRACTION:**
+        - Extract 8-12 relevant skills from the course content
+        - Include technologies, frameworks, platforms, and concepts
+        - List both broad skills (e.g., "Machine Learning") and specific ones (e.g., "XGBoost", "Vertex AI")
+        - Skills should reflect what learners will gain from the course
 
         CRITICAL: All code examples must be real code from discovered repositories with proper attribution.
         """

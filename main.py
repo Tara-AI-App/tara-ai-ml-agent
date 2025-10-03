@@ -41,10 +41,22 @@ class Lesson(BaseModel):
     title: str
     index: int
 
+class QuizChoice(BaseModel):
+    A: str
+    B: str
+    C: str
+    D: str = None  # Optional fourth choice
+
+class Quiz(BaseModel):
+    question: str
+    choices: QuizChoice
+    answer: str  # Should be "A", "B", "C", or "D"
+
 class Module(BaseModel):
     lessons: List[Lesson]
     title: str
     index: int
+    quiz: List[Quiz]
 
 class CourseResponse(BaseModel):
     learning_objectives: List[str]
@@ -54,6 +66,7 @@ class CourseResponse(BaseModel):
     title: str
     source_from: List[str]
     difficulty: str
+    skills: List[str]
 
 def extract_json_from_text(text: str) -> Dict[str, Any]:
     """
@@ -225,6 +238,13 @@ async def generate_course(request: CourseRequest):
                     for lesson_idx, lesson in enumerate(module['lessons'], 1):
                         if 'index' not in lesson:
                             lesson['index'] = lesson_idx
+                # Ensure quiz field exists (default to empty list if not provided)
+                if 'quiz' not in module:
+                    module['quiz'] = []
+
+        # 3. Ensure skills field exists (default to empty list if not provided)
+        if 'skills' not in course_json:
+            course_json['skills'] = []
 
         # Validate and return the course
         return CourseResponse(**course_json)
