@@ -105,15 +105,14 @@ class CourseGenerationAgent:
         - GitHub Tools Available: {self.source_manager.github_tool.is_available()}
 
         **CONTENT DISCOVERY PROCESS:**
-        1. Use analyze_tech_stack to understand the topic complexity and requirements
-        2. **PRIORITY: Use RAG tool first** with discover_sources to find relevant internal context
-           - RAG tool will search internal knowledge base and documentation
-           - If RAG finds sufficient relevant context, prioritize this content for course generation
-        3. **FALLBACK: If no relevant RAG context found**, then use GitHub MCP tools:
-           - Use list_projects to find relevant internal/organizational projects
-           - Use search_repositories with multiple related terms (e.g., for "LGBM GCP" try: "lightgbm", "machine learning gcp", "gradient boosting", "ml deployment")
-           - Use search_code to find specific implementation patterns
-        4. Use get_file_contents to extract actual code examples from discovered repositories
+        1. Call analyze_tech_stack AND discover_sources in PARALLEL (both are independent)
+        2. **Check discover_sources results**:
+           - If discover_sources returns 2+ quality results (total_sources_found >= 2), SKIP GitHub and proceed to course generation
+           - This saves time by avoiding unnecessary GitHub API calls
+        3. **ONLY if discover_sources has < 2 results**, then try GitHub MCP tools ONCE:
+           - Call search_repositories ONCE with best query
+           - If 0 results, STOP GitHub attempts immediately
+        4. If repositories found, use get_file_contents to extract code (optional, only if needed)
         5. Use get_tracked_sources to retrieve all discovered source URLs for inclusion
 
         **RAG TOOL (PRIORITY TOOL):**
@@ -140,21 +139,22 @@ class CourseGenerationAgent:
         **SEARCH STRATEGY FOR DIFFICULT TOPICS:**
         If no relevant RAG context and no external repositories found for exact topic (e.g., "machine learning deployment using LGBM in GCP"):
         1. First, retry discover_sources with generate_search_queries to get alternative search terms for RAG
-        2. If RAG still yields no results, then use GitHub MCP tools:
-           - Use search_repositories with each suggested query from generate_search_queries
-           - Use search_code to find specific implementations with patterns like: "lightgbm train", "model deployment gcp", etc.
-           - Use list_projects to check organizational repositories
-        3. Use get_file_contents to extract actual code from found repositories
+        2. If RAG still yields no results, then try GitHub MCP tools ONCE ONLY:
+           - Call search_repositories ONCE with the best query from generate_search_queries
+           - If 0 results returned, STOP and skip to Google Search fallback
+           - Do NOT retry GitHub MCP tools multiple times
+        3. If GitHub found repositories, use get_file_contents to extract code
         4. **FINAL FALLBACK**: If combined RAG + GitHub results < 3, Google Search automatically activates:
            - Searches for educational content, tutorials, and documentation
            - Prioritizes official docs, educational platforms, and recent articles
            - Provides web-based learning resources as course references
         5. Combine results from all sources to create comprehensive course content
 
-        **IMPORTANT**:
+        **IMPORTANT EFFICIENCY RULES**:
         - Always prioritize RAG tool (internal context) first using discover_sources
         - Use GitHub MCP tools only as fallback when RAG doesn't provide relevant context
-        - Never give up if first search fails. Always use generate_search_queries and try multiple approaches
+        - **CRITICAL: Call each GitHub MCP tool MAXIMUM ONCE** - do not retry if 0 results
+        - If discover_sources returns results, proceed directly to course generation
         - Always prefer internal RAG context over external GitHub sources when available
 
         **COURSE GENERATION REQUIREMENTS:**

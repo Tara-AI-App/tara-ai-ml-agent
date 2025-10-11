@@ -280,9 +280,14 @@ class RAGCourseIntegration:
         """
         Search RAG for top N relevant code examples and return them in a unified format.
         This is designed for single-pass output aggregation.
+
+        OPTIMIZATION: Limit top_n to reduce query time.
         """
         try:
-            results = self.rag_store.search(query, k=top_n, filter_dict=filter_dict)
+            # Optimize: Reduce top_n if it's too high (diminishing returns after 3-5 results)
+            optimized_top_n = min(top_n, 3)  # Cap at 3 for faster queries
+
+            results = self.rag_store.search(query, k=optimized_top_n, filter_dict=filter_dict)
             code_examples = []
             for result in results:
                 metadata = result.metadata if hasattr(result, 'metadata') else {}

@@ -5,6 +5,7 @@ from typing import List, Dict, Any
 from .base import ContentSource, SourceResult, SourceType, SearchQuery
 from ..config.settings import settings
 from ..utils.logger import logger
+from ..utils.cache import cached_search
 from ..rag_processor import rag_integration
 
 
@@ -14,8 +15,9 @@ class RAGTool(ContentSource):
     def __init__(self):
         self.rag_processor = rag_integration
 
+    @cached_search
     async def search(self, query: SearchQuery) -> List[SourceResult]:
-        """Search internal RAG knowledge base."""
+        """Search internal RAG knowledge base with caching."""
         try:
             logger.info(f"Searching RAG for: {query.query}")
 

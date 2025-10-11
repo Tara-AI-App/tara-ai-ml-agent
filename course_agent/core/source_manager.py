@@ -1,6 +1,7 @@
 """
 Source manager for orchestrating content discovery across different sources.
 """
+import asyncio
 from typing import List, Dict, Any, Optional
 from ..tools import SourceResult, SearchQuery, SourceType
 from ..tools.rag_tool import RAGTool
@@ -60,75 +61,134 @@ class SourceManager:
         }
 
     async def _rag_first_strategy(self, topic: str) -> tuple[List[SourceResult], List[SourceResult], List[str]]:
-        """RAG-first content discovery strategy."""
+        """RAG-first content discovery strategy with parallel execution."""
         rag_results = []
         github_results = []
         used_sources = []
 
-        # 1. Try RAG first
+        # Run RAG and GitHub searches in parallel for faster discovery
+        tasks = []
+
         if self.rag_tool.is_available():
-            try:
-                query = SearchQuery(query=topic, max_results=settings.rag.max_results)
-                rag_results = await self.rag_tool.search(query)
-                used_sources.append("RAG")
+            tasks.append(self._search_rag_async(topic))
 
-                # Check if RAG results are sufficient
-                if self.rag_tool.assess_content_sufficiency(rag_results, topic):
-                    logger.info("RAG results sufficient - skipping GitHub search")
-                    return rag_results, github_results, used_sources
+        # Always search GitHub in parallel (don't wait for RAG sufficiency check)
+        if self.github_tool.is_available():
+            tasks.append(self._search_github(topic))
 
-            except Exception as e:
-                logger.warning(f"RAG search failed: {e}")
+        # Execute in parallel
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 2. Supplement with GitHub if needed
-        github_results = await self._search_github(topic)
-        if github_results:
-            used_sources.append("GitHub")
+            # Process results
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.warning(f"Search task {i} failed: {result}")
+                    continue
+
+                # First result is RAG (if available)
+                if i == 0 and self.rag_tool.is_available():
+                    rag_results = result if isinstance(result, list) else []
+                    if rag_results:
+                        used_sources.append("RAG")
+                # Second result is GitHub (if both available) or first if only GitHub
+                elif (i == 1 and self.rag_tool.is_available()) or (i == 0 and not self.rag_tool.is_available()):
+                    github_results = result if isinstance(result, list) else []
+                    if github_results:
+                        used_sources.append("GitHub")
 
         return rag_results, github_results, used_sources
 
+    async def _search_rag_async(self, topic: str) -> List[SourceResult]:
+        """Async wrapper for RAG search."""
+        try:
+            query = SearchQuery(query=topic, max_results=settings.rag.max_results)
+            return await self.rag_tool.search(query)
+        except Exception as e:
+            logger.warning(f"RAG search failed: {e}")
+            return []
+
     async def _github_first_strategy(self, topic: str) -> tuple[List[SourceResult], List[SourceResult], List[str]]:
-        """GitHub-first content discovery strategy."""
+        """GitHub-first content discovery strategy with parallel execution."""
         github_results = []
         rag_results = []
         used_sources = []
 
-        # 1. Try GitHub first
-        github_results = await self._search_github(topic)
-        if github_results:
-            used_sources.append("GitHub")
+        # Run both in parallel
+        tasks = []
 
-        # 2. Supplement with RAG
+        if self.github_tool.is_available():
+            tasks.append(self._search_github(topic))
+
         if self.rag_tool.is_available():
-            try:
-                query = SearchQuery(query=topic, max_results=settings.rag.max_results)
-                rag_results = await self.rag_tool.search(query)
-                if rag_results:
-                    used_sources.append("RAG")
-            except Exception as e:
-                logger.warning(f"RAG search failed: {e}")
+            tasks.append(self._search_rag_async(topic))
+
+        # Execute in parallel
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.warning(f"Search task {i} failed: {result}")
+                    continue
+
+                # First result is GitHub (if available)
+                if i == 0 and self.github_tool.is_available():
+                    github_results = result if isinstance(result, list) else []
+                    if github_results:
+                        used_sources.append("GitHub")
+                # Second result is RAG (if both available) or first if only RAG
+                elif (i == 1 and self.github_tool.is_available()) or (i == 0 and not self.github_tool.is_available()):
+                    rag_results = result if isinstance(result, list) else []
+                    if rag_results:
+                        used_sources.append("RAG")
 
         return rag_results, github_results, used_sources
 
     async def _balanced_strategy(self, topic: str) -> tuple[List[SourceResult], List[SourceResult], List[str]]:
-        """Balanced content discovery strategy."""
+        """Balanced content discovery strategy with parallel execution."""
         rag_results = []
         github_results = []
         used_sources = []
 
-        # Search both sources concurrently (conceptually)
-        if self.rag_tool.is_available():
-            try:
-                query = SearchQuery(query=topic, max_results=settings.rag.max_results // 2)
-                rag_results = await self.rag_tool.search(query)
-                if rag_results:
-                    used_sources.append("RAG")
-            except Exception as e:
-                logger.warning(f"RAG search failed: {e}")
+        # Search both sources concurrently in parallel
+        tasks = []
 
-        github_results = await self._search_github(topic)
-        if github_results:
-            used_sources.append("GitHub")
+        if self.rag_tool.is_available():
+            async def search_rag_balanced():
+                try:
+                    query = SearchQuery(query=topic, max_results=settings.rag.max_results // 2)
+                    return await self.rag_tool.search(query)
+                except Exception as e:
+                    logger.warning(f"RAG search failed: {e}")
+                    return []
+
+            tasks.append(search_rag_balanced())
+
+        if self.github_tool.is_available():
+            tasks.append(self._search_github(topic))
+
+        # Execute in parallel
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.warning(f"Search task {i} failed: {result}")
+                    continue
+
+                # First result is RAG (if available)
+                if i == 0 and self.rag_tool.is_available():
+                    rag_results = result if isinstance(result, list) else []
+                    if rag_results:
+                        used_sources.append("RAG")
+                # Second result is GitHub (if both available) or first if only GitHub
+                elif (i == 1 and self.rag_tool.is_available()) or (i == 0 and not self.rag_tool.is_available()):
+                    github_results = result if isinstance(result, list) else []
+                    if github_results:
+                        used_sources.append("GitHub")
 
         return rag_results, github_results, used_sources
 
@@ -156,33 +216,59 @@ class SourceManager:
             return []
 
     async def get_repository_content(self, repository: str, file_patterns: List[str]) -> Dict[str, str]:
-        """Get specific file contents from a repository."""
+        """Get specific file contents from a repository in parallel."""
         if not self.github_tool.is_available():
             return {}
 
-        content = {}
-        for pattern in file_patterns:
+        # Fetch all files in parallel for faster extraction
+        async def fetch_file(pattern: str) -> tuple[str, str]:
             try:
                 file_content = await self.github_tool.get_file_contents(repository, pattern)
-                content[pattern] = file_content
+                return (pattern, file_content)
             except Exception as e:
                 logger.warning(f"Failed to get {pattern} from {repository}: {e}")
+                return (pattern, "")
+
+        tasks = [fetch_file(pattern) for pattern in file_patterns]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        content = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning(f"File fetch error: {result}")
+                continue
+            if isinstance(result, tuple) and len(result) == 2:
+                pattern, file_content = result
+                if file_content:  # Only add non-empty content
+                    content[pattern] = file_content
 
         return content
 
     async def search_code_in_repositories(self, query: str, repositories: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        """Search for specific code patterns across repositories."""
+        """Search for specific code patterns across repositories in parallel."""
         if not self.github_tool.is_available():
             return []
 
         all_results = []
+
         if repositories:
-            for repo in repositories:
+            # Search all repositories in parallel
+            async def search_in_repo(repo: str) -> List[Dict[str, Any]]:
                 try:
-                    results = await self.github_tool.search_code(query, repo)
-                    all_results.extend(results)
+                    return await self.github_tool.search_code(query, repo)
                 except Exception as e:
                     logger.warning(f"Code search failed in {repo}: {e}")
+                    return []
+
+            tasks = [search_in_repo(repo) for repo in repositories]
+            results_list = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for results in results_list:
+                if isinstance(results, Exception):
+                    logger.warning(f"Code search error: {results}")
+                    continue
+                if isinstance(results, list):
+                    all_results.extend(results)
         else:
             try:
                 results = await self.github_tool.search_code(query)

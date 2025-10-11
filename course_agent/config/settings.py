@@ -31,7 +31,7 @@ class MCPConfig:
         "search_code",
         "list_projects"
     ])
-    max_repositories: int = 5
+    max_repositories: int = 2  # Reduced from 5 to 2 for faster performance
     max_code_results: int = 10
     quality_threshold: int = 100  # Minimum stars for repository consideration
 

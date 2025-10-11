@@ -11,6 +11,7 @@ import uuid
 from .base import ContentSource, SourceResult, SourceType, SearchQuery
 from ..config.settings import settings
 from ..utils.logger import logger
+from ..utils.cache import cached_search
 
 
 class GoogleSearchTool(ContentSource):
@@ -44,8 +45,9 @@ class GoogleSearchTool(ContentSource):
         # Create runner for executing the search agent
         self.runner = InMemoryRunner(agent=self.search_agent)
 
+    @cached_search
     async def search(self, query: SearchQuery) -> List[SourceResult]:
-        """Search using Google Search for educational content."""
+        """Search using Google Search for educational content with caching."""
         try:
             logger.info(f"Searching Google for: {query.query}")
 
