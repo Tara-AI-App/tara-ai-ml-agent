@@ -215,9 +215,11 @@ class SourceManager:
             return []
 
         try:
-            # Try to get authenticated user, but don't fail if it doesn't work
+            # Try to get authenticated user and their repositories for context
             # The agent can call get_me + search_repositories manually later
             username = None
+            user_repos = []
+
             logger.info("Attempting to call get_me programmatically...")
             try:
                 mcp_toolset = self.github_tool._mcp_tools
@@ -227,6 +229,22 @@ class SourceManager:
                         username = result.get('login', '')
                         if username:
                             logger.info(f"✓ Successfully got username: {username}")
+
+                            # Now get user's repositories to see what's available
+                            logger.info(f"Fetching repositories for context...")
+                            try:
+                                repos_result = await mcp_toolset.call_tool('search_repositories', {
+                                    'query': f'user:{username}',
+                                    'max_results': 20  # Get more repos for better matching
+                                })
+                                if repos_result and isinstance(repos_result, list):
+                                    user_repos = [r.get('name', '') for r in repos_result if r.get('name')]
+                                    logger.info(f"✓ Found {len(user_repos)} repositories in user's account")
+                                    logger.info(f"  Available repos: {', '.join(user_repos[:10])}")
+                                    if len(user_repos) > 10:
+                                        logger.info(f"  ... and {len(user_repos) - 10} more")
+                            except Exception as e:
+                                logger.info(f"⚠ Could not fetch user repos: {e}")
                         else:
                             logger.info("✗ get_me returned empty username")
                     else:
@@ -236,7 +254,7 @@ class SourceManager:
             except Exception as e:
                 logger.info(f"✗ get_me failed: {e}")
 
-            # Extract potential repository name from topic
+            # Extract potential repository name from topic with multiple strategies
             logger.info(f"Extracting repository name from topic...")
             topic_lower = topic.lower()
             words = topic_lower.split()
@@ -244,11 +262,36 @@ class SourceManager:
             # Common words to ignore when extracting repo name
             ignore_words = {'about', 'project', 'repository', 'repo', 'make', 'create', 'generate',
                            'course', 'the', 'a', 'an', 'for', 'on', 'in', 'of', 'my', 'your', 'want',
-                           'know', 'to', 'me', 'can', 'you', 'i'}
+                           'know', 'to', 'me', 'can', 'you', 'i', 'help', 'learn', 'from'}
 
             # Extract potential repository name (words that aren't common filler words)
             potential_repo_names = [word for word in words if word not in ignore_words and len(word) > 2]
             logger.info(f"Potential repo names extracted: {potential_repo_names}")
+
+            # Generate multiple search variations
+            search_variations = []
+            if len(potential_repo_names) > 0:
+                # Variation 1: Join with hyphens (capstone-seis-flask)
+                hyphenated = '-'.join(potential_repo_names)
+                search_variations.append(hyphenated)
+
+                # Variation 2: Join with underscores (capstone_seis_flask)
+                underscored = '_'.join(potential_repo_names)
+                search_variations.append(underscored)
+
+                # Variation 3: Concatenated (capstoneseis flask)
+                concatenated = ''.join(potential_repo_names)
+                search_variations.append(concatenated)
+
+                # Variation 4: Space-separated (capstone seis flask)
+                space_separated = ' '.join(potential_repo_names)
+                search_variations.append(space_separated)
+
+                # Variation 5: Original single word if only one
+                if len(potential_repo_names) == 1:
+                    search_variations.append(potential_repo_names[0])
+
+            logger.info(f"Generated search variations: {search_variations[:5]}")  # Show first 5
 
             # If no username and no clear repo name, skip search
             # The agent will need to call get_me + search_repositories manually
@@ -258,45 +301,132 @@ class SourceManager:
                 logger.info("-" * 80)
                 return []
 
-            # Construct search query based on whether we got username
-            if username:
-                logger.info(f"Constructing query WITH username: {username}")
-                # If we have a single clear repository name candidate, use repo: qualifier
-                if len(potential_repo_names) == 1:
-                    repo_name = potential_repo_names[0]
-                    user_query = f"repo:{username}/{repo_name}"
-                    logger.info(f"→ Query type: Exact repo match")
-                    logger.info(f"→ Query: {user_query}")
-                elif len(potential_repo_names) > 0:
-                    # Multiple potential keywords, search in user's repos
-                    repo_keywords = ' '.join(potential_repo_names)
-                    user_query = f"user:{username} {repo_keywords} in:name,description,readme"
-                    logger.info(f"→ Query type: User repos with keywords")
-                    logger.info(f"→ Query: {user_query}")
+            # If we have user's repo list, do smart fuzzy matching first
+            best_match = None
+            if user_repos and search_variations:
+                logger.info(f"Performing fuzzy matching against {len(user_repos)} user repositories...")
+
+                # Simple fuzzy matching: check if any variation matches any repo name
+                for variation in search_variations:
+                    variation_lower = variation.lower()
+                    for repo_name in user_repos:
+                        repo_lower = repo_name.lower()
+
+                        # Exact match
+                        if variation_lower == repo_lower:
+                            best_match = repo_name
+                            logger.info(f"✓ Exact match found: {repo_name}")
+                            break
+
+                        # Contains match (variation is in repo name)
+                        if variation_lower in repo_lower:
+                            best_match = repo_name
+                            logger.info(f"✓ Contains match found: {repo_name} (contains '{variation}')")
+                            break
+
+                        # Repo name contains all keywords
+                        if all(keyword in repo_lower for keyword in potential_repo_names):
+                            best_match = repo_name
+                            logger.info(f"✓ Keyword match found: {repo_name} (has all keywords)")
+                            break
+
+                    if best_match:
+                        break
+
+                # If we found a match, search for it specifically
+                if best_match and username:
+                    logger.info(f"Using best match: {best_match}")
+                    user_query = f"repo:{username}/{best_match}"
+                    logger.info(f"→ Targeted query: {user_query}")
+
+                    repositories = await self.github_tool.search_repositories(
+                        query=user_query,
+                        max_results=settings.mcp.max_repositories
+                    )
+                    github_results = self.github_tool.extract_source_results(repositories)
+
+                    if len(github_results) > 0:
+                        logger.info(f"✓ Found repository via smart matching!")
+                        # Skip the fallback strategies
+                        user_query = f"repo:{username}/{best_match}"  # Store for logging
+                    else:
+                        best_match = None  # Reset if search failed
+
+            # Try multiple search strategies in order of likelihood
+            if not github_results and username and search_variations:
+                # Strategy 1: Try exact match with hyphenated name (most common)
+                logger.info(f"Strategy 1: Exact match with hyphenated name")
+                repo_name = search_variations[0]  # hyphenated version
+                user_query = f"repo:{username}/{repo_name}"
+                logger.info(f"→ Query: {user_query}")
+
+                repositories = await self.github_tool.search_repositories(
+                    query=user_query,
+                    max_results=settings.mcp.max_repositories
+                )
+                github_results = self.github_tool.extract_source_results(repositories)
+
+                if len(github_results) > 0:
+                    logger.info(f"✓ Found {len(github_results)} repo(s) with exact hyphenated match")
                 else:
-                    # Generic search in user's repositories
-                    user_query = f"user:{username} {topic}"
-                    logger.info(f"→ Query type: User repos generic")
+                    # Strategy 2: Try with underscores
+                    logger.info(f"Strategy 2: Exact match with underscored name")
+                    repo_name = search_variations[1]  # underscored version
+                    user_query = f"repo:{username}/{repo_name}"
                     logger.info(f"→ Query: {user_query}")
+
+                    repositories = await self.github_tool.search_repositories(
+                        query=user_query,
+                        max_results=settings.mcp.max_repositories
+                    )
+                    github_results = self.github_tool.extract_source_results(repositories)
+
+                    if len(github_results) > 0:
+                        logger.info(f"✓ Found {len(github_results)} repo(s) with underscored match")
+                    else:
+                        # Strategy 3: Fuzzy search in user's repos with keywords
+                        logger.info(f"Strategy 3: Fuzzy search with all keywords")
+                        keywords = ' '.join(potential_repo_names)
+                        user_query = f"user:{username} {keywords} in:name"
+                        logger.info(f"→ Query: {user_query}")
+
+                        repositories = await self.github_tool.search_repositories(
+                            query=user_query,
+                            max_results=settings.mcp.max_repositories
+                        )
+                        github_results = self.github_tool.extract_source_results(repositories)
+
+                        if len(github_results) > 0:
+                            logger.info(f"✓ Found {len(github_results)} repo(s) with fuzzy search")
+                        else:
+                            # Strategy 4: Broader search with first keyword only
+                            logger.info(f"Strategy 4: Broad search with primary keyword")
+                            primary_keyword = potential_repo_names[0]
+                            user_query = f"user:{username} {primary_keyword} in:name,description"
+                            logger.info(f"→ Query: {user_query}")
+
+                            repositories = await self.github_tool.search_repositories(
+                                query=user_query,
+                                max_results=settings.mcp.max_repositories
+                            )
+                            github_results = self.github_tool.extract_source_results(repositories)
+
+                            if len(github_results) > 0:
+                                logger.info(f"✓ Found {len(github_results)} repo(s) with broad search")
             else:
-                logger.info(f"Constructing query WITHOUT username (will be limited results)")
-                # No username - search with repo name only
+                # No username - use basic search
+                logger.info(f"Constructing query WITHOUT username (limited results)")
                 if len(potential_repo_names) > 0:
                     repo_keywords = ' '.join(potential_repo_names)
                     user_query = f"{repo_keywords} in:name"
-                    logger.info(f"→ Query type: Repo name search (no user scope)")
                     logger.info(f"→ Query: {user_query}")
                     logger.info(f"⚠ This may return 0 results - agent should try get_me + search_repositories")
 
-            # Search for repositories
-            logger.info(f"Executing GitHub search...")
-            repositories = await self.github_tool.search_repositories(
-                query=user_query,
-                max_results=settings.mcp.max_repositories
-            )
-
-            # Convert to SourceResult format
-            github_results = self.github_tool.extract_source_results(repositories)
+                    repositories = await self.github_tool.search_repositories(
+                        query=user_query,
+                        max_results=settings.mcp.max_repositories
+                    )
+                    github_results = self.github_tool.extract_source_results(repositories)
 
             logger.info(f"✓ Search completed: Found {len(github_results)} repositories")
             if len(github_results) == 0:
