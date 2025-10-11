@@ -5,6 +5,7 @@ import subprocess
 import os
 import json
 import re
+from pathlib import Path
 
 # Load environment variables from .env file
 try:
@@ -15,14 +16,20 @@ except ImportError:
 
 # Import ADK course agent
 from course_agent.agents.course_agent import create_course_agent
+from course_agent.tools.drive_tool import CredentialsManager
 
 app = FastAPI(title="Course Generator API", version="1.0.0")
+
+# Initialize credentials manager
+CREDENTIALS_BASE_PATH = os.getenv("CREDENTIALS_BASE_PATH", "/credentials")
+credentials_manager = CredentialsManager(base_path=CREDENTIALS_BASE_PATH)
 
 # Ensure required environment variables are set
 if not os.getenv("GOOGLE_CLOUD_PROJECT"):
     print("WARNING: GOOGLE_CLOUD_PROJECT environment variable not set. Add it to your .env file.")
 
 class CourseRequest(BaseModel):
+    user_id: str
     token_github: str
     token_drive: str
     prompt: str
@@ -301,11 +308,23 @@ async def generate_course(request: CourseRequest):
     Generate a course using the ADK course agent.
 
     This endpoint:
-    1. Creates a course agent with the provided GitHub token
-    2. Sends the user's prompt to the agent using InMemoryRunner
-    3. Extracts and returns the generated course JSON
+    1. Creates a course agent with the provided GitHub and Drive tokens
+    2. Saves Drive credentials to shared volume for user
+    3. Provisions Drive MCP Docker container (for testing)
+    4. Sends the user's prompt to the agent using InMemoryRunner
+    5. Extracts and returns the generated course JSON
     """
+    drive_credentials_path = None
+    
     try:
+        # Save user's Drive credentials to shared volume if provided
+        if request.token_drive:
+            drive_credentials_path = credentials_manager.save_drive_credentials(
+                user_id=request.user_id,
+                drive_token=request.token_drive
+            )
+            print(f"📁 Drive credentials saved for user {request.user_id} at: {drive_credentials_path}")
+        
         # Create course agent with provided tokens
         course_agent_instance = create_course_agent(
             github_token=request.token_github if request.token_github else None,
@@ -315,7 +334,7 @@ async def generate_course(request: CourseRequest):
         # Get the ADK agent
         agent = course_agent_instance.get_agent()
 
-        # Run agent with full tool support (RAG, GitHub MCP, Search)
+        # Run agent with full tool support (RAG, GitHub MCP, Drive MCP, Search)
         response_text = await _run_agent_with_tools_async(agent, request.prompt)
 
         # If response is empty, provide helpful error
@@ -398,58 +417,6 @@ async def generate_course(request: CourseRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Course generation failed: {str(e)}"
-        )
-
-@app.post("/mcp/github", response_model=GitHubMCPResponse)
-async def provision_github_mcp(request: GitHubMCPRequest):
-    """
-    Provision a GitHub MCP server Docker container.
-    """
-    try:
-        # Build the docker command - use 'docker' since it's in PATH inside container
-        # Connect to the same network as this container for communication
-        docker_cmd = [
-            "docker", "run", "-i", "--rm", "-d",
-            "--network", "tara-ai-ml-agent_course-agent-network",
-            "-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={request.token_github}",
-            "-e", "GITHUB_READ_ONLY=1",
-            "ghcr.io/github/github-mcp-server"
-        ]
-        
-        # Get current environment
-        env = os.environ.copy()
-        
-        # Execute the docker command
-        result = subprocess.run(
-            docker_cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env
-        )
-        
-        if result.returncode == 0:
-            container_id = result.stdout.strip()
-            return GitHubMCPResponse(
-                status="success",
-                message="GitHub MCP server container provisioned successfully",
-                container_id=container_id
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to provision container: {result.stderr}"
-            )
-            
-    except subprocess.TimeoutExpired:
-        raise HTTPException(
-            status_code=500,
-            detail="Docker command timed out"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error provisioning container: {str(e)}"
         )
 
 @app.get("/")
