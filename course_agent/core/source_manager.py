@@ -27,7 +27,11 @@ class SourceManager:
         Returns:
             Dict with keys: 'rag_results', 'github_results', 'used_sources'
         """
-        logger.info(f"Starting content discovery for topic: {topic}")
+        logger.info("=" * 80)
+        logger.info(f"STARTING CONTENT DISCOVERY")
+        logger.info(f"Topic: {topic}")
+        logger.info(f"Source Priority: {self._source_priority.value}")
+        logger.info("=" * 80)
 
         # Initialize results
         rag_results: List[SourceResult] = []
@@ -50,7 +54,15 @@ class SourceManager:
             if search_results:
                 used_sources.append("Google Search")
 
-        logger.info(f"Content discovery completed. Sources used: {used_sources}")
+        # Log final summary
+        logger.info("=" * 80)
+        logger.info(f"CONTENT DISCOVERY COMPLETED")
+        logger.info(f"Sources used: {used_sources}")
+        logger.info(f"RAG results: {len(rag_results)}")
+        logger.info(f"GitHub results: {len(github_results)}")
+        logger.info(f"Search results: {len(search_results)}")
+        logger.info(f"Total results: {len(rag_results) + len(github_results) + len(search_results)}")
+        logger.info("=" * 80)
 
         return {
             'rag_results': rag_results,
@@ -193,26 +205,112 @@ class SourceManager:
         return rag_results, github_results, used_sources
 
     async def _search_github(self, topic: str) -> List[SourceResult]:
-        """Search GitHub repositories for the topic."""
+        """Search GitHub repositories for the topic, prioritizing the authenticated user's repositories."""
+        logger.info("-" * 80)
+        logger.info(f"GITHUB SEARCH STARTING")
+        logger.info(f"Topic: {topic}")
+
         if not self.github_tool.is_available():
             logger.warning("GitHub tools not available")
             return []
 
         try:
+            # Try to get authenticated user, but don't fail if it doesn't work
+            # The agent can call get_me + search_repositories manually later
+            username = None
+            logger.info("Attempting to call get_me programmatically...")
+            try:
+                mcp_toolset = self.github_tool._mcp_tools
+                if mcp_toolset and hasattr(mcp_toolset, 'call_tool'):
+                    result = await mcp_toolset.call_tool('get_me', {})
+                    if result and isinstance(result, dict):
+                        username = result.get('login', '')
+                        if username:
+                            logger.info(f"✓ Successfully got username: {username}")
+                        else:
+                            logger.info("✗ get_me returned empty username")
+                    else:
+                        logger.info(f"✗ get_me returned non-dict: {type(result)}")
+                else:
+                    logger.info("✗ MCP toolset doesn't have call_tool method")
+            except Exception as e:
+                logger.info(f"✗ get_me failed: {e}")
+
+            # Extract potential repository name from topic
+            logger.info(f"Extracting repository name from topic...")
+            topic_lower = topic.lower()
+            words = topic_lower.split()
+
+            # Common words to ignore when extracting repo name
+            ignore_words = {'about', 'project', 'repository', 'repo', 'make', 'create', 'generate',
+                           'course', 'the', 'a', 'an', 'for', 'on', 'in', 'of', 'my', 'your', 'want',
+                           'know', 'to', 'me', 'can', 'you', 'i'}
+
+            # Extract potential repository name (words that aren't common filler words)
+            potential_repo_names = [word for word in words if word not in ignore_words and len(word) > 2]
+            logger.info(f"Potential repo names extracted: {potential_repo_names}")
+
+            # If no username and no clear repo name, skip search
+            # The agent will need to call get_me + search_repositories manually
+            if not username and not potential_repo_names:
+                logger.info("⚠ No username and no clear repo name - skipping automatic search")
+                logger.info("→ Agent should call get_me + search_repositories manually")
+                logger.info("-" * 80)
+                return []
+
+            # Construct search query based on whether we got username
+            if username:
+                logger.info(f"Constructing query WITH username: {username}")
+                # If we have a single clear repository name candidate, use repo: qualifier
+                if len(potential_repo_names) == 1:
+                    repo_name = potential_repo_names[0]
+                    user_query = f"repo:{username}/{repo_name}"
+                    logger.info(f"→ Query type: Exact repo match")
+                    logger.info(f"→ Query: {user_query}")
+                elif len(potential_repo_names) > 0:
+                    # Multiple potential keywords, search in user's repos
+                    repo_keywords = ' '.join(potential_repo_names)
+                    user_query = f"user:{username} {repo_keywords} in:name,description,readme"
+                    logger.info(f"→ Query type: User repos with keywords")
+                    logger.info(f"→ Query: {user_query}")
+                else:
+                    # Generic search in user's repositories
+                    user_query = f"user:{username} {topic}"
+                    logger.info(f"→ Query type: User repos generic")
+                    logger.info(f"→ Query: {user_query}")
+            else:
+                logger.info(f"Constructing query WITHOUT username (will be limited results)")
+                # No username - search with repo name only
+                if len(potential_repo_names) > 0:
+                    repo_keywords = ' '.join(potential_repo_names)
+                    user_query = f"{repo_keywords} in:name"
+                    logger.info(f"→ Query type: Repo name search (no user scope)")
+                    logger.info(f"→ Query: {user_query}")
+                    logger.info(f"⚠ This may return 0 results - agent should try get_me + search_repositories")
+
             # Search for repositories
+            logger.info(f"Executing GitHub search...")
             repositories = await self.github_tool.search_repositories(
-                query=topic,
+                query=user_query,
                 max_results=settings.mcp.max_repositories
             )
 
             # Convert to SourceResult format
             github_results = self.github_tool.extract_source_results(repositories)
 
-            logger.info(f"Found {len(github_results)} GitHub repositories for topic: {topic}")
+            logger.info(f"✓ Search completed: Found {len(github_results)} repositories")
+            if len(github_results) == 0:
+                logger.warning("⚠ 0 repositories found - Agent should call get_me + search_repositories manually")
+            else:
+                for i, result in enumerate(github_results, 1):
+                    logger.info(f"  {i}. {result.repository}")
+            logger.info("-" * 80)
+
             return github_results
 
         except Exception as e:
-            logger.error(f"GitHub search failed: {e}")
+            logger.error(f"✗ GitHub search failed: {e}")
+            logger.info("-" * 80)
             return []
 
     async def get_repository_content(self, repository: str, file_patterns: List[str]) -> Dict[str, str]:

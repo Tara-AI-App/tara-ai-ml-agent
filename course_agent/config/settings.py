@@ -73,6 +73,12 @@ class AgentConfig:
     source_priority: SourcePriority = SourcePriority.RAG_FIRST
     log_level: LogLevel = LogLevel.INFO
 
+    # Model generation parameters for deterministic behavior
+    temperature: float = 0.1  # Lower temperature for more predictable outputs
+    top_p: float = 0.95
+    top_k: int = 40
+    max_output_tokens: int = 50000  # Increased for complete course JSON generation
+
     # Sub-configurations
     mcp: MCPConfig = field(default_factory=MCPConfig)
     rag: RAGConfig = field(default_factory=RAGConfig)
@@ -110,7 +116,11 @@ class AgentConfig:
         return {
             "model_name": self.model_name,
             "project_id": self.project_id,
-            "location": self.location
+            "location": self.location,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "max_output_tokens": self.max_output_tokens
         }
 
 

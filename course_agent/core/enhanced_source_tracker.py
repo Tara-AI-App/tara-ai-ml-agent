@@ -135,16 +135,40 @@ class EnhancedSourceTracker:
         }
 
     def get_source_urls(self) -> List[str]:
-        """Get all source URLs and file paths."""
-        urls = []
+        """
+        Get all source URLs and file paths, prioritizing GitHub repositories.
+
+        Returns sources in priority order:
+        1. GitHub repository URLs (highest priority - user's repos)
+        2. Search result URLs
+        3. RAG file paths (lowest priority - only if no better sources)
+        """
+        github_urls = []
+        search_urls = []
+        rag_paths = []
 
         for source in self.sources:
-            if source.url and source.url not in urls:
-                urls.append(source.url)
-            elif source.file_path and source.file_path not in urls:
-                urls.append(source.file_path)
+            if source.source_type == SourceType.GITHUB:
+                if source.url and source.url not in github_urls:
+                    github_urls.append(source.url)
+            elif source.source_type == SourceType.SEARCH:
+                if source.url and source.url not in search_urls:
+                    search_urls.append(source.url)
+            elif source.source_type == SourceType.RAG:
+                # Only include RAG if no URLs (just file_path)
+                if source.file_path and source.file_path not in rag_paths:
+                    rag_paths.append(source.file_path)
 
-        return urls
+        # Return in priority order: GitHub first, then Search, then RAG (only if no others)
+        if github_urls:
+            logger.info(f"Tracked GitHub sources: {github_urls}")
+            return github_urls + search_urls  # If we have GitHub, don't include RAG paths
+        elif search_urls:
+            logger.info(f"Tracked Search sources: {search_urls}")
+            return search_urls  # If we have Search, don't include RAG paths
+        else:
+            logger.info(f"Tracked RAG sources: {rag_paths}")
+            return rag_paths  # Only return RAG if nothing else
 
     def _source_to_dict(self, source: TrackedSource) -> Dict[str, Any]:
         """Convert TrackedSource to dictionary for serialization."""

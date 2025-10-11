@@ -70,7 +70,7 @@ class CourseResponse(BaseModel):
 
 def repair_json_string(json_str: str) -> str:
     """
-    Attempt to repair common JSON issues.
+    Attempt to repair common JSON issues, including incomplete JSON.
     """
     # Remove trailing commas before } or ]
     json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
@@ -80,6 +80,77 @@ def repair_json_string(json_str: str) -> str:
     end = json_str.rfind('}')
     if start != -1 and end != -1:
         json_str = json_str[start:end+1]
+
+    # Try to complete incomplete JSON by counting braces
+    if start != -1:
+        brace_count = 0
+        bracket_count = 0
+        in_string = False
+        escape_next = False
+
+        for i in range(len(json_str)):
+            char = json_str[i]
+
+            if escape_next:
+                escape_next = False
+                continue
+
+            if char == '\\':
+                escape_next = True
+                continue
+
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+
+            if not in_string:
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                elif char == '[':
+                    bracket_count += 1
+                elif char == ']':
+                    bracket_count -= 1
+
+        # If JSON is incomplete, try to close it
+        if brace_count > 0 or bracket_count > 0:
+            # Truncate to last complete element to avoid mid-string corruption
+            # Find last complete comma or closing brace/bracket
+            last_safe_pos = len(json_str)
+            for i in range(len(json_str) - 1, -1, -1):
+                if json_str[i] in [',', '}', ']'] and not in_string:
+                    last_safe_pos = i + 1
+                    break
+
+            json_str = json_str[:last_safe_pos]
+
+            # Recalculate counts after truncation
+            brace_count = bracket_count = 0
+            in_string = escape_next = False
+            for char in json_str:
+                if escape_next:
+                    escape_next = False
+                    continue
+                if char == '\\':
+                    escape_next = True
+                    continue
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                    elif char == '[':
+                        bracket_count += 1
+                    elif char == ']':
+                        bracket_count -= 1
+
+            # Close open brackets and braces
+            json_str += ']' * bracket_count
+            json_str += '}' * brace_count
 
     return json_str
 

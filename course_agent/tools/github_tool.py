@@ -74,7 +74,7 @@ class GitHubMCPTool(RepositoryTool):
                     "search_repositories",
                     "get_file_contents",
                     "search_code",
-                    "list_projects"
+                    "get_me"
                 ],
             )
 
@@ -146,6 +146,21 @@ class GitHubMCPTool(RepositoryTool):
         except Exception as e:
             logger.error(f"Code search failed: {e}")
             return []
+
+    async def get_me(self) -> Dict[str, Any]:
+        """Get the authenticated user's profile using MCP."""
+        if not self.is_available():
+            logger.warning("GitHub MCP tools not available")
+            return {}
+
+        try:
+            logger.info("Fetching authenticated user profile")
+            # Note: MCP tools are called directly by the agent framework
+            # This method serves as a placeholder that will be overridden by the agent
+            return {}
+        except Exception as e:
+            logger.error(f"Get user profile failed: {e}")
+            return {}
 
     def extract_source_results(self, repositories: List[Dict[str, Any]]) -> List[SourceResult]:
         """Convert repository data to standardized SourceResult format."""

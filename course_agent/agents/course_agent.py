@@ -7,6 +7,7 @@ from typing import Dict, Any, List
 from datetime import datetime
 from google.adk.agents import Agent
 from google.adk.tools import FunctionTool
+from google.genai import types
 
 # Apply JSON encoder patch early to handle Pydantic serialization issues
 from ..utils.json_encoder import CustomJSONEncoder
@@ -85,12 +86,21 @@ class CourseGenerationAgent:
         else:
             logger.warning("GitHub MCP tools not available")
 
+        # Create generation config for deterministic behavior
+        generation_config = types.GenerateContentConfig(
+            temperature=self.settings.temperature,
+            topP=self.settings.top_p,
+            topK=self.settings.top_k,
+            maxOutputTokens=self.settings.max_output_tokens
+        )
+
         return Agent(
             model=self.settings.model_name,
             name=self.settings.name,
             description=self.settings.description,
             instruction=self._get_agent_instruction(),
-            tools=tools
+            tools=tools,
+            generate_content_config=generation_config
         )
 
     def _get_agent_instruction(self) -> str:
@@ -105,24 +115,120 @@ class CourseGenerationAgent:
         - GitHub Tools Available: {self.source_manager.github_tool.is_available()}
 
         **CONTENT DISCOVERY PROCESS:**
-        1. Call analyze_tech_stack AND discover_sources in PARALLEL (both are independent)
-        2. **Check discover_sources results**:
-           - If discover_sources returns 2+ quality results (total_sources_found >= 2), SKIP GitHub and proceed to course generation
-           - This saves time by avoiding unnecessary GitHub API calls
-        3. **ONLY if discover_sources has < 2 results**, then try GitHub MCP tools ONCE:
-           - Call search_repositories ONCE with best query
-           - If 0 results, STOP GitHub attempts immediately
-        4. If repositories found, use get_file_contents to extract code (optional, only if needed)
-        5. Use get_tracked_sources to retrieve all discovered source URLs for inclusion
+
+        **⚠️ STEP 0: MANDATORY - ESTABLISH GITHUB USER CONTEXT (ALWAYS DO THIS FIRST) ⚠️**
+        - **BEFORE doing anything else, call get_me to get the authenticated GitHub username**
+        - This establishes context for which GitHub account is connected
+        - Store the username for later repository searches
+        - Example: get_me returns {{"login": "Reynxzz"}} → username is "Reynxzz"
+        - **DO THIS EVEN IF** you think you might not need GitHub later
+        - **WHY**: When user says "graphflix", you'll know to search "Reynxzz/graphflix" not just "graphflix"
+
+        **Example Flow:**
+        ```
+        User: "Generate course about graphflix"
+
+        Step 0: Call get_me → returns {{"login": "Reynxzz"}}
+                Store username: "Reynxzz"
+
+        Step 1: Call discover_sources("graphflix")
+                → github_results_count = 0 (because automatic search failed)
+
+        Step 2: Since github_results_count = 0 AND user mentioned "graphflix":
+                Call search_repositories("repo:Reynxzz/graphflix")
+                → Found! Use as PRIMARY source
+        ```
+
+        1. **After establishing GitHub context, call analyze_tech_stack AND discover_sources in PARALLEL**
+
+        2. **Strictly evaluate what discover_sources ACTUALLY returned**:
+           - discover_sources searches both RAG and GitHub automatically
+           - Check rag_results_count: actual RAG sources found
+           - Check github_results_count: actual GitHub repos found
+           - Check total_sources_found: combined total
+           - **CRITICAL**: Only use sources that were ACTUALLY returned, never invent sources
+
+        3. **IF github_results_count = 0 AND user asked about a project/repository**:
+           **⚠️ MANDATORY ACTION - DO NOT SKIP EVEN IF YOU HAVE OTHER SOURCES ⚠️**
+
+           **How to detect if user is asking about a project/repository**:
+           - User mentions: "project", "repo", "repository", "my", "from my repo"
+           - User uses hyphenated names: "graphflix", "capstone-seis-flask", "thinktok-pwa"
+           - User asks to "learn about X" where X looks like a code project name
+           - User mentions specific app/service names that aren't common tech terms
+           - **DEFAULT ASSUMPTION**: If query mentions a specific name (not a generic tech term), try GitHub FIRST
+
+           **Examples that should trigger GitHub search**:
+           - ✅ "help me learn about capstone-seis-flask project" → GitHub repo
+           - ✅ "help me learn about capstone-seis-flask" → GitHub repo (even without "project")
+           - ✅ "graphflix" → GitHub repo
+           - ✅ "my thinktok app" → GitHub repo
+           - ✅ "zyo-deploy" → GitHub repo
+           - ❌ "learn about React" → General tech term, not a repo
+           - ❌ "learn about machine learning" → General topic, not a repo
+
+           **Action Steps**:
+           - You MUST try manual GitHub search for the user's repository
+           - Do this EVEN IF RAG or Google found sources
+           - Why: User's personal repository is the PRIMARY source for their project
+           - Steps:
+             1. Use the username from get_me (called in Step 0)
+             2. Call search_repositories with "repo:<username>/<projectname>"
+             3. If found: Use repository as PRIMARY source (not RAG/Google)
+           - Example: "capstone-seis-flask" → search_repositories("repo:Reynxzz/capstone-seis-flask")
+           - Do NOT skip this because RAG/Google already found something
+
+        4. **Decision logic based on ACTUAL results**:
+           - ALWAYS try user's GitHub repo if user mentioned a project name
+           - After trying GitHub: If total_sources_found >= 2, proceed
+           - If total_sources_found < 2 after all attempts: Acknowledge insufficient content
+
+        5. **ALWAYS use get_tracked_sources** to get the actual source URLs that were found
+
+        6. **NEVER invent or hallucinate source paths** - only use what get_tracked_sources returns
 
         **RAG TOOL (PRIORITY TOOL):**
         - discover_sources: Search internal knowledge base and documentation for relevant context
 
         **GITHUB MCP TOOLS AVAILABLE (FALLBACK TOOLS):**
-        - list_projects: List internal/organizational projects
-        - search_repositories: Find repositories by name, description, topics
+        - get_me: Get the authenticated GitHub user's profile
+        - search_repositories: Find repositories by name, description, topics, readme
         - search_code: Search for specific code patterns across GitHub
         - get_file_contents: Extract actual files from repositories
+
+        **CRITICAL - SOURCE VALIDATION (PREVENT HALLUCINATION):**
+
+        **What discover_sources does**:
+        - Searches BOTH RAG and GitHub automatically based on configured priority
+        - Returns ACTUAL results found (not assumptions)
+        - You MUST use only what it returns, never make up sources
+
+        **How to handle different query types**:
+
+        1. **Internal/Company Projects** (e.g., "merlin", "caraml"):
+           - discover_sources searches RAG automatically
+           - If rag_results_count > 0: Use those RAG sources
+           - If rag_results_count = 0: Content truly doesn't exist in RAG
+           - DO NOT invent RAG sources that weren't returned
+
+        2. **User's Personal Projects** (e.g., "my graphflix"):
+           - discover_sources searches user's GitHub automatically (via source_manager)
+           - If github_results_count > 0: Use those GitHub repos
+           - If github_results_count = 0: Repo not found OR needs manual search
+           - Only if not found: Try manual search with get_me + search_repositories
+           - If still not found: Acknowledge it doesn't exist, don't make it up
+
+        3. **Ambiguous queries** (e.g., "graphflix"):
+           - discover_sources searches both RAG and GitHub
+           - Use whatever ACTUAL results are returned
+           - Don't assume it's in RAG or GitHub - check the counts
+
+        **ABSOLUTE RULES TO PREVENT HALLUCINATION**:
+        - ✅ ONLY use sources returned by get_tracked_sources
+        - ✅ If total_sources_found = 0, acknowledge insufficient content
+        - ❌ NEVER create fake source paths like "internal/rag_knowledge_base/graphflix/..."
+        - ❌ NEVER assume content exists in RAG without checking rag_results_count
+        - ❌ NEVER assume repo exists in GitHub without checking github_results_count
 
         **GOOGLE SEARCH TOOL (FINAL FALLBACK):**
         - Automatically triggered when RAG and GitHub MCP provide insufficient results (< 3 total)
@@ -130,30 +236,133 @@ class CourseGenerationAgent:
         - Focuses on high-quality sources from reputable educational platforms
 
 
-        **DYNAMIC CONTENT EXTRACTION:**
-        - Extract real code snippets from discovered repositories using get_file_contents
-        - Reference actual file paths and repository locations
-        - Build course structure based on real-world examples found via search_code
-        - Include direct links to repository files for hands-on learning
+        **CRITICAL - CODE EXTRACTION FROM REPOSITORIES:**
 
-        **SEARCH STRATEGY FOR DIFFICULT TOPICS:**
-        If no relevant RAG context and no external repositories found for exact topic (e.g., "machine learning deployment using LGBM in GCP"):
-        1. First, retry discover_sources with generate_search_queries to get alternative search terms for RAG
-        2. If RAG still yields no results, then try GitHub MCP tools ONCE ONLY:
-           - Call search_repositories ONCE with the best query from generate_search_queries
-           - If 0 results returned, STOP and skip to Google Search fallback
-           - Do NOT retry GitHub MCP tools multiple times
-        3. If GitHub found repositories, use get_file_contents to extract code
-        4. **FINAL FALLBACK**: If combined RAG + GitHub results < 3, Google Search automatically activates:
-           - Searches for educational content, tutorials, and documentation
-           - Prioritizes official docs, educational platforms, and recent articles
-           - Provides web-based learning resources as course references
-        5. Combine results from all sources to create comprehensive course content
+        **STEP-BY-STEP FILE EXTRACTION PROCESS:**
+
+        1. **After finding a GitHub repository**, you MUST extract code files:
+           - Call get_file_contents(repository="owner/repo", file_path="README.md") for the README
+           - Call get_file_contents(repository="owner/repo", file_path="package.json") for package.json
+           - Call get_file_contents(repository="owner/repo", file_path="**/*.ts") for TypeScript files
+           - Call get_file_contents(repository="owner/repo", file_path="**/*.py") for Python files
+           - Call get_file_contents(repository="owner/repo", file_path="**/*.go") for Go files
+           - Adjust file patterns based on what the repository likely contains
+
+        2. **IMPORTANT**: Each get_file_contents call returns ONE file's content:
+           - The tool returns the actual file content as a string
+           - If file doesn't exist, it returns empty string or error
+           - You need to call it MULTIPLE times for multiple files
+           - DO NOT expect extract_repository_content to return files - that's just a helper
+           - YOU must call get_file_contents directly for each file you want
+
+        3. **To include code examples in the course**:
+           - MUST call get_file_contents(repository, file_path) to extract the code
+           - ONLY reference files that get_file_contents successfully returned
+           - If get_file_contents returns empty or fails: DO NOT reference that file
+
+        4. **To reference file paths in content**:
+           - ❌ NEVER make up file paths like "algorithms/content_recommend.js"
+           - ❌ NEVER assume files exist without calling get_file_contents
+           - ✅ ONLY reference: Repository URL (e.g., "https://github.com/user/repo")
+           - ✅ OR files you extracted with get_file_contents
+
+        5. **Valid references**:
+           - ✅ "From: https://github.com/Reynxzz/graphflix"
+           - ✅ "Based on the Reynxzz/graphflix repository"
+           - ❌ "From: https://github.com/Reynxzz/graphflix/algorithms/content_recommend.js" (unless you extracted it)
+
+        6. **If you couldn't extract files**:
+           - Just reference the repository generally
+           - Don't make up specific file paths
+           - Example: "Based on the graphflix repository structure..."
+
+        **EXAMPLE WORKFLOW FOR EXTRACTING CODE:**
+        ```
+        1. User asks: "Generate course about graphflix project"
+        2. Call discover_sources → github_results_count = 0
+        3. Call get_me → returns "Reynxzz"
+        4. Call search_repositories("repo:Reynxzz/graphflix") → finds repository
+        5. NOW EXTRACT FILES (critical step):
+           - Call get_file_contents(repository="Reynxzz/graphflix", file_path="README.md")
+           - Call get_file_contents(repository="Reynxzz/graphflix", file_path="package.json")
+           - Call get_file_contents(repository="Reynxzz/graphflix", file_path="src/index.ts")
+           - Call get_file_contents(repository="Reynxzz/graphflix", file_path="src/config.ts")
+        6. Use the ACTUAL file contents returned in the course
+        7. Call get_tracked_sources to get repository URL
+        8. Generate course with real code examples
+        ```
+
+        **MANDATORY SEARCH STRATEGY - ALWAYS TRY USER'S GITHUB REPO:**
+
+        **REMINDER: You should have already called get_me in STEP 0 at the start**
+        - If you didn't call get_me yet, call it NOW before proceeding
+
+        **When user mentions a specific project name** (like "graphflix", "thinktok", "zyo-deploy"):
+
+        **STEP 1: Check discover_sources results**
+        - Check github_results_count from discover_sources
+        - If github_results_count = 0: User's repo NOT found automatically
+
+        **STEP 2: MANDATORY Manual GitHub Search** (when github_results_count = 0):
+        **YOU MUST DO THIS REGARDLESS OF OTHER SOURCES**:
+        - Even if rag_results_count > 0
+        - Even if search_results_count > 0
+        - Even if total_sources_found >= 2
+        - WHY: User's personal repo is the PRIMARY source when they ask about their project
+
+        **Required Steps (NOT OPTIONAL)**:
+        1. Use the username from get_me (already called in STEP 0)
+        2. Extract project name from user query:
+           - "graphflix project" → "graphflix"
+           - "my thinktok-pwa" → "thinktok-pwa"
+           - "about zyo-deploy" → "zyo-deploy"
+        3. Call search_repositories with "repo:<username>/<projectname>"
+           - Example: search_repositories("repo:Reynxzz/graphflix")
+        4. If found: Use as PRIMARY source
+        5. If not found: Try "user:<username> <projectname> in:name"
+        6. If still not found: Document that repo wasn't accessible
+
+        **Examples of MANDATORY Execution**:
+        - User: "graphflix project" + github_results_count=0 → search_repositories("repo:Reynxzz/graphflix")
+        - User: "my thinktok" + github_results_count=0 → search_repositories("repo:Reynxzz/thinktok")
+        - User: "zyo-deploy" + github_results_count=0 → search_repositories("repo:Reynxzz/zyo-deploy")
+        - Do this EVEN IF RAG found 2 results already!
+        - Username "Reynxzz" comes from get_me called in STEP 0
+
+        **STEP 3: For Internal Projects** (when rag_results_count = 0):
+        - Try generate_search_queries for alternative terms
+        - Call discover_sources again with alternative query
+        - If still rag_results_count = 0: Content truly not in knowledge base
+
+        **STEP 4: FINAL FALLBACK**
+        - If total_sources_found < 3: Google Search activates automatically
+        - Use web content as supplementary material
+
+        **CRITICAL: Don't give up before trying manual GitHub search!**
+
+        **WHEN TO GENERATE A COURSE (CRITICAL)**:
+        You MUST generate a course if ANY of these conditions are met:
+        - total_sources_found >= 1 (even if some sources are "low quality")
+        - rag_results_count >= 1
+        - github_results_count >= 1
+        - You successfully called search_repositories and found ANY repository
+        - get_tracked_sources returns ANY non-empty list
+
+        **NEVER refuse to generate a course if**:
+        - You found RAG sources (even if marked "low quality" - use them anyway)
+        - You found GitHub repositories (even if couldn't extract all files)
+        - discover_sources returned ANY results
+        - ❌ WRONG: "couldn't find sufficient content" when total_sources_found > 0
+        - ❌ WRONG: Refusing due to "low quality" sources - use them anyway
+
+        **CORRECT RESPONSES**:
+        - If ANY sources found: Generate course using those sources
+        - Only if total_sources_found = 0 after ALL attempts: Then say "couldn't find content"
 
         **IMPORTANT EFFICIENCY RULES**:
         - Always prioritize RAG tool (internal context) first using discover_sources
-        - Use GitHub MCP tools only as fallback when RAG doesn't provide relevant context
-        - **CRITICAL: Call each GitHub MCP tool MAXIMUM ONCE** - do not retry if 0 results
+        - GitHub search automatically scopes to the authenticated user's repositories
+        - The system handles get_me and user scoping automatically - no manual intervention needed
         - If discover_sources returns results, proceed directly to course generation
         - Always prefer internal RAG context over external GitHub sources when available
 
@@ -165,6 +374,14 @@ class CourseGenerationAgent:
         - Include repository URLs in source_from array
         - Estimated duration: {self.settings.course.default_duration}
         - Default difficulty: {self.settings.course.default_difficulty}
+
+        **CONTENT LENGTH GUIDELINES (IMPORTANT FOR TOKEN LIMITS):**
+        - Keep lesson content concise and focused (aim for 500-1000 words per lesson)
+        - Include 1-2 key code examples per lesson (not full file dumps)
+        - Use code snippets (10-30 lines) rather than entire files
+        - Focus on the most important/illustrative code sections
+        - If showing API responses, use shortened examples (3-5 items, not full responses)
+        - Remember: Quality over quantity - concise, clear lessons are better than verbose ones
 
         **OUTPUT FORMAT - CRITICAL:**
         You MUST return ONLY valid JSON. Do NOT include any explanatory text before or after the JSON.
@@ -188,6 +405,21 @@ class CourseGenerationAgent:
         9. Ensure ALL brackets and braces are properly closed
         10. Test your JSON is valid before returning it
 
+        **CRITICAL - BEFORE GENERATING COURSE:**
+        1. Review what you ACTUALLY found:
+           - What did discover_sources return?
+           - What did get_file_contents return (if called)?
+           - What URLs are in get_tracked_sources?
+        2. ONLY use information from those actual results
+        3. DO NOT invent:
+           - File paths you didn't extract
+           - Code you didn't retrieve
+           - Source URLs not in get_tracked_sources
+        4. If you have limited information:
+           - That's OK! Create course with what you have
+           - Reference repository generally (not specific fake files)
+           - Explain concepts based on repository description/README
+
         Generate a comprehensive course in this EXACT JSON format:
         {{
             "title": "Descriptive Course Title",
@@ -204,7 +436,7 @@ class CourseGenerationAgent:
                         {{
                             "title": "Lesson Title",
                             "index": 1,
-                            "content": "# Lesson Title\\n\\n## Real Example\\n\\nFrom: https://github.com/owner/repo/blob/main/path/file.py\\n\\n```language\\n// Actual code from repository\\nreal_code_here()\\n```\\n\\n**Explanation**: This code from [repository name] demonstrates..."
+                            "content": "# Lesson Title\\n\\n## Overview\\n\\nBased on the [repository name] repository...\\n\\n**Key Concepts**: Explain concepts here without making up file paths.\\n\\nIf you extracted code with get_file_contents, THEN include:\\n```language\\n// Actual code you extracted\\nreal_code_here()\\n```\\n\\nOtherwise, explain concepts generally without fake file references."
                         }}
                     ],
                     "quiz": [
@@ -221,8 +453,29 @@ class CourseGenerationAgent:
                     ]
                 }}
             ],
-            "source_from": ["https://github.com/owner/repo", "internal/path.md"]
+            "source_from": [<<ACTUAL_SOURCES_FROM_get_tracked_sources>>]
         }}
+
+        **CRITICAL - source_from FIELD**:
+        - **STEP 1**: Call get_tracked_sources BEFORE generating the JSON
+        - **STEP 2**: Use ONLY the URLs returned by get_tracked_sources
+        - **STEP 3**: Put those EXACT URLs in the source_from array
+        - DO NOT create, invent, or hallucinate source paths
+        - DO NOT use paths like "internal/rag_knowledge_base/..." unless get_tracked_sources returned them
+        - If get_tracked_sources returns [] (empty array): use [] in source_from
+
+        **Examples**:
+        - ✅ get_tracked_sources returns ["https://github.com/Reynxzz/graphflix"] → use exactly that
+        - ✅ get_tracked_sources returns [] → use "source_from": []
+        - ✅ get_tracked_sources returns ["rag_doc_id_123"] → use exactly that
+        - ❌ NEVER: Make up "internal/rag_knowledge_base/graphflix/..." when get_tracked_sources didn't return it
+        - ❌ NEVER: Assume sources exist without checking get_tracked_sources first
+
+        **Workflow**:
+        1. Call get_tracked_sources
+        2. If it returns sources: Use them in source_from
+        3. If it returns empty []: Put [] in source_from (don't invent sources)
+        4. Generate course JSON with ACTUAL sources only
 
         **QUIZ REQUIREMENTS:**
         - Each module must have 2-4 quiz questions
