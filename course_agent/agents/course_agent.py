@@ -30,13 +30,14 @@ from ..core.enhanced_source_tracker import EnhancedSourceTracker
 class CourseGenerationAgent:
     """Main course generation agent with modular architecture."""
 
-    def __init__(self, github_token: str = None, drive_token: str = None):
+    def __init__(self, github_token: str = None, drive_token: str = None, user_id: str = None):
         """
         Initialize the course generation agent.
 
         Args:
             github_token: GitHub personal access token (overrides env var)
-            drive_token: Google Drive token (for future use)
+            drive_token: Google Drive token
+            user_id: User ID for Drive credentials management
         """
         # Set tokens in environment if provided
         if github_token:
@@ -45,14 +46,53 @@ class CourseGenerationAgent:
             os.environ['GOOGLE_DRIVE_TOKEN'] = drive_token
 
         self.settings = settings
+        self.user_id = user_id
+        self.drive_token = drive_token
         self.source_manager = SourceManager()
         self.source_tracker = EnhancedSourceTracker()
+
+        # Initialize Drive tool separately if user_id and drive_token are provided
+        self.drive_tool = None
+        if user_id and drive_token:
+            self._initialize_drive_tool()
+
         self.agent = self._create_agent()
 
         # Validate configuration
         config_issues = self.settings.validate()
         if config_issues:
             logger.warning(f"Configuration issues detected: {config_issues}")
+
+    def _initialize_drive_tool(self):
+        """Initialize Google Drive MCP tool."""
+        from ..tools.drive_tool import GoogleDriveMCPTool, CredentialsManager
+        import os
+
+        try:
+            logger.info(f"Initializing Google Drive MCP tool for user {self.user_id}")
+
+            # Use configurable credentials base path
+            credentials_base = os.getenv("CREDENTIALS_BASE_PATH", "./credentials")
+            logger.info(f"Using credentials base path: {credentials_base}")
+
+            # Save credentials using CredentialsManager
+            credentials_manager = CredentialsManager(base_path=credentials_base)
+            credentials_path = credentials_manager.save_drive_credentials(
+                user_id=self.user_id,
+                drive_token=self.drive_token
+            )
+
+            # Initialize Drive tool with credentials
+            self.drive_tool = GoogleDriveMCPTool(
+                user_id=self.user_id,
+                credentials_path=credentials_path
+            )
+
+            logger.info(f"Drive tool initialized: {self.drive_tool.is_available()}")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize Drive tool: {e}")
+            self.drive_tool = None
 
     def _create_agent(self) -> Agent:
         """Create the ADK agent with proper configuration."""
@@ -66,7 +106,7 @@ class CourseGenerationAgent:
             FunctionTool(self.save_course_to_file)
         ]
 
-        # Add MCP tools if available
+        # Add GitHub MCP tools if available
         logger.info(f"Checking if GitHub MCP tools are available...")
         github_available = self.source_manager.github_tool.is_available()
         logger.info(f"GitHub tool is_available(): {github_available}")
@@ -85,6 +125,26 @@ class CourseGenerationAgent:
                 logger.warning("GitHub MCP toolset is None")
         else:
             logger.warning("GitHub MCP tools not available")
+
+        # Add Google Drive MCP tools if available
+        logger.info(f"Checking if Google Drive MCP tools are available...")
+        drive_available = self.drive_tool and self.drive_tool.is_available()
+        logger.info(f"Drive tool is_available(): {drive_available}")
+
+        if drive_available:
+            # Add the Drive MCP toolset
+            drive_mcp_toolset = self.drive_tool._mcp_tools
+            logger.info(f"Retrieved Drive MCP toolset: {drive_mcp_toolset}")
+            logger.info(f"Drive MCP toolset type: {type(drive_mcp_toolset)}")
+
+            if drive_mcp_toolset:
+                tools.append(drive_mcp_toolset)
+                logger.info("Google Drive MCP toolset added to agent")
+                logger.info(f"Total tools count: {len(tools)}")
+            else:
+                logger.warning("Drive MCP toolset is None")
+        else:
+            logger.warning("Google Drive MCP tools not available")
 
         # Create generation config for deterministic behavior
         generation_config = types.GenerateContentConfig(
@@ -113,6 +173,7 @@ class CourseGenerationAgent:
         - Max Repositories: {self.settings.mcp.max_repositories}
         - RAG Max Results: {self.settings.rag.max_results}
         - GitHub Tools Available: {self.source_manager.github_tool.is_available()}
+        - Google Drive Tools Available: {self.drive_tool.is_available() if self.drive_tool else False}
 
         **CONTENT DISCOVERY PROCESS:**
 
@@ -203,6 +264,23 @@ class CourseGenerationAgent:
         - search_repositories: Find repositories by name, description, topics, readme
         - search_code: Search for specific code patterns across GitHub
         - get_file_contents: Extract actual files from repositories
+
+        **GOOGLE DRIVE MCP TOOLS AVAILABLE:**
+        - search_drive: Search for files in Google Drive by name or content
+        - read_file: Read file contents from Google Drive
+        - list_files: List files in a specific Drive folder
+
+        **When to use Google Drive tools:**
+        - User mentions "my Drive", "Google Drive", "shared folder", or "Drive files"
+        - User references specific Drive file names or folders
+        - User wants to include documentation or resources from their Drive
+        - Use Drive tools to supplement GitHub/RAG sources with user's personal documents
+
+        **Drive Integration Strategy:**
+        - If user mentions Drive explicitly: Search Drive FIRST before other sources
+        - If Drive files are found: Include them as primary sources alongside GitHub/RAG
+        - Reference Drive files with proper Drive URLs in source_from array
+        - Extract relevant content from Drive files to enhance course material
 
         **CRITICAL - SOURCE VALIDATION (PREVENT HALLUCINATION):**
 
@@ -749,6 +827,7 @@ class CourseGenerationAgent:
             "agent_name": self.settings.name,
             "source_priority": self.settings.source_priority.value,
             "github_available": self.source_manager.github_tool.is_available(),
+            "drive_available": self.drive_tool.is_available() if self.drive_tool else False,
             "rag_available": self.source_manager.rag_tool.is_available(),
             "configuration_issues": self.settings.validate(),
             "max_repositories": self.settings.mcp.max_repositories,
@@ -758,14 +837,15 @@ class CourseGenerationAgent:
 
 
 # Create the main agent instance
-def create_course_agent(github_token: str = None, drive_token: str = None) -> CourseGenerationAgent:
+def create_course_agent(github_token: str = None, drive_token: str = None, user_id: str = None) -> CourseGenerationAgent:
     """
     Factory function to create a configured course generation agent.
 
     Args:
         github_token: GitHub personal access token (overrides env var)
-        drive_token: Google Drive token (for future use)
+        drive_token: Google Drive token
+        user_id: User ID for Drive credentials management
     """
-    agent = CourseGenerationAgent(github_token=github_token, drive_token=drive_token)
+    agent = CourseGenerationAgent(github_token=github_token, drive_token=drive_token, user_id=user_id)
     logger.info(f"Course generation agent created: {agent.get_configuration_status()}")
     return agent

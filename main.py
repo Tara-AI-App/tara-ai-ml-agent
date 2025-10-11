@@ -21,7 +21,8 @@ from course_agent.tools.drive_tool import CredentialsManager
 app = FastAPI(title="Course Generator API", version="1.0.0")
 
 # Initialize credentials manager
-CREDENTIALS_BASE_PATH = os.getenv("CREDENTIALS_BASE_PATH", "/credentials")
+# Use ./credentials for local dev, /credentials for Docker
+CREDENTIALS_BASE_PATH = os.getenv("CREDENTIALS_BASE_PATH", "./credentials")
 credentials_manager = CredentialsManager(base_path=CREDENTIALS_BASE_PATH)
 
 # Ensure required environment variables are set
@@ -326,10 +327,11 @@ async def generate_course(request: CourseRequest):
             )
             print(f"📁 Drive credentials saved for user {request.user_id} at: {drive_credentials_path}")
         
-        # Create course agent with provided tokens
+        # Create course agent with provided tokens and user_id
         course_agent_instance = create_course_agent(
             github_token=request.token_github if request.token_github else None,
-            drive_token=request.token_drive if request.token_drive else None
+            drive_token=request.token_drive if request.token_drive else None,
+            user_id=request.user_id
         )
 
         # Get the ADK agent
@@ -426,6 +428,88 @@ async def root():
     Root endpoint for health check.
     """
     return {"message": "Course Generator API is running"}
+
+@app.post("/debug/agent-status")
+async def debug_agent_status(request: CourseRequest):
+    """
+    Debug endpoint to check agent configuration and Drive integration status.
+
+    This endpoint:
+    1. Creates an agent with the provided tokens
+    2. Returns detailed status of all tools (GitHub, Drive, RAG)
+    3. Shows credentials paths and availability
+    """
+    try:
+        # Create course agent with provided tokens
+        course_agent_instance = create_course_agent(
+            github_token=request.token_github if request.token_github else None,
+            drive_token=request.token_drive if request.token_drive else None,
+            user_id=request.user_id
+        )
+
+        # Get configuration status
+        config_status = course_agent_instance.get_configuration_status()
+
+        # Get Drive-specific details
+        drive_details = {}
+        if course_agent_instance.drive_tool:
+            drive_details = {
+                "user_id": course_agent_instance.drive_tool._user_id,
+                "credentials_path": course_agent_instance.drive_tool._credentials_path,
+                "is_available": course_agent_instance.drive_tool.is_available(),
+                "mcp_tools_initialized": course_agent_instance.drive_tool._mcp_tools is not None,
+                "mcp_tools_type": str(type(course_agent_instance.drive_tool._mcp_tools).__name__) if course_agent_instance.drive_tool._mcp_tools else None
+            }
+        else:
+            drive_details = {
+                "status": "not_initialized",
+                "reason": "No drive_token or user_id provided"
+            }
+
+        # Get GitHub-specific details
+        github_details = {
+            "is_available": course_agent_instance.source_manager.github_tool.is_available(),
+            "mcp_tools_initialized": course_agent_instance.source_manager.github_tool._mcp_tools is not None
+        }
+
+        # Get agent tools list
+        adk_agent = course_agent_instance.get_agent()
+        tools_list = []
+        if hasattr(adk_agent, 'tools'):
+            from google.adk.tools.mcp_tool import McpToolset
+            for tool in adk_agent.tools:
+                tool_info = {
+                    "type": type(tool).__name__,
+                    "is_mcp": isinstance(tool, McpToolset)
+                }
+                tools_list.append(tool_info)
+
+        return {
+            "status": "success",
+            "agent_configuration": config_status,
+            "drive_integration": drive_details,
+            "github_integration": github_details,
+            "agent_tools": tools_list,
+            "summary": {
+                "total_tools": len(tools_list),
+                "mcp_tools_count": sum(1 for t in tools_list if t["is_mcp"]),
+                "github_enabled": github_details["is_available"],
+                "drive_enabled": drive_details.get("is_available", False),
+                "ready_for_generation": all([
+                    config_status.get("rag_available", False) or
+                    config_status.get("github_available", False) or
+                    config_status.get("drive_available", False)
+                ])
+            }
+        }
+
+    except Exception as e:
+        import traceback
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 if __name__ == "__main__":
     import uvicorn
