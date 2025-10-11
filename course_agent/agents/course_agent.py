@@ -124,6 +124,14 @@ class CourseGenerationAgent:
         - **DO THIS EVEN IF** you think you might not need GitHub later
         - **WHY**: When user says "graphflix", you'll know to search "Reynxzz/graphflix" not just "graphflix"
 
+        **STEP 0.5: MANDATORY - GET USER'S REPO LIST FOR CONTEXT**
+        - After get_me, **YOU MUST call**: search_repositories("user:<username>") to list all user's repos
+        - This returns the complete list of repositories with full details (name, url, description)
+        - **IMPORTANT**: Save this list! You will use it later to find exact matches
+        - Example: search_repositories("user:gemm123") → returns: [{{name: "bytesv2", url: "...", full_name: "gemm123/bytesv2"}}, ...]
+        - This list IS your source of truth for what repos exist
+        - When user asks about a project, match against this list to get the exact repository object
+
         **Example Flow:**
         ```
         User: "Generate course about graphflix"
@@ -311,23 +319,64 @@ class CourseGenerationAgent:
         - WHY: User's personal repo is the PRIMARY source when they ask about their project
 
         **Required Steps (NOT OPTIONAL)**:
-        1. Use the username from get_me (already called in STEP 0)
-        2. Extract project name from user query:
-           - "graphflix project" → "graphflix"
-           - "my thinktok-pwa" → "thinktok-pwa"
-           - "about zyo-deploy" → "zyo-deploy"
-        3. Call search_repositories with "repo:<username>/<projectname>"
-           - Example: search_repositories("repo:Reynxzz/graphflix")
-        4. If found: Use as PRIMARY source
-        5. If not found: Try "user:<username> <projectname> in:name"
-        6. If still not found: Document that repo wasn't accessible
+        1. **YOU ALREADY HAVE THE REPO LIST from STEP 0.5** - Use it!
+           - You called search_repositories("user:<username>") in STEP 0.5
+           - That returned ALL user's repositories with complete details
+           - Example result: [{{name: "bytesv2", url: "https://github.com/gemm123/bytesv2", full_name: "gemm123/bytesv2"}}, ...]
 
-        **Examples of MANDATORY Execution**:
-        - User: "graphflix project" + github_results_count=0 → search_repositories("repo:Reynxzz/graphflix")
-        - User: "my thinktok" + github_results_count=0 → search_repositories("repo:Reynxzz/thinktok")
-        - User: "zyo-deploy" + github_results_count=0 → search_repositories("repo:Reynxzz/zyo-deploy")
-        - Do this EVEN IF RAG found 2 results already!
-        - Username "Reynxzz" comes from get_me called in STEP 0
+        2. **Match user's query against your saved repo list**:
+           - User says: "bytesv2 project"
+           - Look in your list: find repo where name == "bytesv2"
+           - Found: {{name: "bytesv2", url: "...", full_name: "gemm123/bytesv2"}}
+           - **USE THIS REPOSITORY OBJECT DIRECTLY** - no need to search again!
+
+        3. **Fuzzy matching examples**:
+           - User: "bytes v2" → match "bytesv2" from list (contains "bytes")
+           - User: "capstone seis flask" → match "capstone-seis-flask" from list
+           - User: "graphflix project" → match "graphflix" from list
+           - Find the closest match by checking if repo names contain the keywords
+
+        4. **CRITICAL - DO NOT SEARCH AGAIN**:
+           - ❌ DO NOT call search_repositories("user:gemm123 bytesv2 in:name")
+           - ❌ DO NOT call search_repositories("repo:gemm123/bytesv2")
+           - ✅ USE the repository object from your STEP 0.5 list directly
+           - WHY: GitHub search API is unreliable, but the list from STEP 0.5 has everything
+
+        5. **If repo is in your list**:
+           - You have: name, url, full_name, description
+           - Use this to extract files with get_file_contents
+           - Use the full_name (e.g., "gemm123/bytesv2") for get_file_contents calls
+
+        6. **Only if repo is NOT in your list**:
+           - Then document that repo doesn't exist in user's account
+
+        **Examples of CORRECT Execution**:
+        ```
+        Step 0: get_me → username = "gemm123"
+        Step 0.5: search_repositories("user:gemm123") →
+                  Returns: [
+                    {{name: "bytesv2", full_name: "gemm123/bytesv2", url: "..."}},
+                    {{name: "graphflix", full_name: "gemm123/graphflix", url: "..."}},
+                    {{name: "capstone-seis-flask", full_name: "gemm123/capstone-seis-flask", url: "..."}}
+                  ]
+
+        User: "bytesv2 project"
+        → Look in list: "bytesv2" found!
+        → Use {{name: "bytesv2", full_name: "gemm123/bytesv2"}} directly
+        → Call get_file_contents(repository="gemm123/bytesv2", file_path="README.md")
+        → Generate course ✅
+
+        User: "bytes v2"
+        → Match "bytes" against list: "bytesv2" contains "bytes" → match!
+        → Use bytesv2 from list ✅
+
+        User: "capstone seis flask"
+        → Match keywords against list: "capstone-seis-flask" has all keywords → match!
+        → Use capstone-seis-flask from list ✅
+        ```
+
+        - **DO NOT search again** - use the repository from STEP 0.5 list
+        - STEP 0.5 already gave you everything you need!
 
         **STEP 3: For Internal Projects** (when rag_results_count = 0):
         - Try generate_search_queries for alternative terms

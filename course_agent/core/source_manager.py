@@ -271,25 +271,31 @@ class SourceManager:
             # Generate multiple search variations
             search_variations = []
             if len(potential_repo_names) > 0:
-                # Variation 1: Join with hyphens (capstone-seis-flask)
-                hyphenated = '-'.join(potential_repo_names)
-                search_variations.append(hyphenated)
-
-                # Variation 2: Join with underscores (capstone_seis_flask)
-                underscored = '_'.join(potential_repo_names)
-                search_variations.append(underscored)
-
-                # Variation 3: Concatenated (capstoneseis flask)
-                concatenated = ''.join(potential_repo_names)
-                search_variations.append(concatenated)
-
-                # Variation 4: Space-separated (capstone seis flask)
-                space_separated = ' '.join(potential_repo_names)
-                search_variations.append(space_separated)
-
-                # Variation 5: Original single word if only one
+                # For single word (like "bytesv2"), use it directly first
                 if len(potential_repo_names) == 1:
-                    search_variations.append(potential_repo_names[0])
+                    single_word = potential_repo_names[0]
+                    search_variations.append(single_word)
+                    # Also add common variations for single words
+                    search_variations.append(single_word + '-api')
+                    search_variations.append(single_word + '-app')
+                    search_variations.append(single_word + '-project')
+                else:
+                    # For multiple words, generate variations
+                    # Variation 1: Join with hyphens (capstone-seis-flask)
+                    hyphenated = '-'.join(potential_repo_names)
+                    search_variations.append(hyphenated)
+
+                    # Variation 2: Join with underscores (capstone_seis_flask)
+                    underscored = '_'.join(potential_repo_names)
+                    search_variations.append(underscored)
+
+                    # Variation 3: Concatenated (capstoneseis flask)
+                    concatenated = ''.join(potential_repo_names)
+                    search_variations.append(concatenated)
+
+                    # Variation 4: Space-separated (capstone seis flask)
+                    space_separated = ' '.join(potential_repo_names)
+                    search_variations.append(space_separated)
 
             logger.info(f"Generated search variations: {search_variations[:5]}")  # Show first 5
 
@@ -303,35 +309,62 @@ class SourceManager:
 
             # If we have user's repo list, do smart fuzzy matching first
             best_match = None
+            match_score = 0
+
             if user_repos and search_variations:
                 logger.info(f"Performing fuzzy matching against {len(user_repos)} user repositories...")
 
-                # Simple fuzzy matching: check if any variation matches any repo name
-                for variation in search_variations:
-                    variation_lower = variation.lower()
-                    for repo_name in user_repos:
-                        repo_lower = repo_name.lower()
+                # Try to find best match with scoring
+                for repo_name in user_repos:
+                    repo_lower = repo_name.lower()
+                    current_score = 0
+                    match_reason = ""
 
-                        # Exact match
+                    # Check each variation and keyword
+                    for variation in search_variations:
+                        variation_lower = variation.lower()
+
+                        # Exact match (highest score)
                         if variation_lower == repo_lower:
-                            best_match = repo_name
-                            logger.info(f"✓ Exact match found: {repo_name}")
+                            current_score = 100
+                            match_reason = f"exact match with '{variation}'"
                             break
 
-                        # Contains match (variation is in repo name)
+                        # Repo name starts with variation (very high score)
+                        if repo_lower.startswith(variation_lower):
+                            current_score = max(current_score, 90)
+                            match_reason = f"starts with '{variation}'"
+
+                        # Repo name ends with variation (high score)
+                        if repo_lower.endswith(variation_lower):
+                            current_score = max(current_score, 85)
+                            match_reason = f"ends with '{variation}'"
+
+                        # Variation is in repo name (good score)
                         if variation_lower in repo_lower:
-                            best_match = repo_name
-                            logger.info(f"✓ Contains match found: {repo_name} (contains '{variation}')")
-                            break
+                            current_score = max(current_score, 80)
+                            match_reason = f"contains '{variation}'"
 
-                        # Repo name contains all keywords
-                        if all(keyword in repo_lower for keyword in potential_repo_names):
-                            best_match = repo_name
-                            logger.info(f"✓ Keyword match found: {repo_name} (has all keywords)")
-                            break
+                        # Repo name is in variation (reverse contains)
+                        if repo_lower in variation_lower:
+                            current_score = max(current_score, 75)
+                            match_reason = f"'{variation}' contains repo name"
 
-                    if best_match:
-                        break
+                    # Check if all keywords are in repo name
+                    if all(keyword in repo_lower for keyword in potential_repo_names):
+                        keyword_score = 70 + (len(potential_repo_names) * 5)  # More keywords = higher confidence
+                        if keyword_score > current_score:
+                            current_score = keyword_score
+                            match_reason = f"has all keywords: {potential_repo_names}"
+
+                    # Update best match if this is better
+                    if current_score > match_score:
+                        match_score = current_score
+                        best_match = repo_name
+                        logger.info(f"  New best match: {repo_name} (score: {current_score}, {match_reason})")
+
+                if best_match:
+                    logger.info(f"✓ Best match selected: {best_match} (final score: {match_score})")
 
                 # If we found a match, search for it specifically
                 if best_match and username:
@@ -354,10 +387,10 @@ class SourceManager:
 
             # Try multiple search strategies in order of likelihood
             if not github_results and username and search_variations:
-                # Strategy 1: Try exact match with hyphenated name (most common)
-                logger.info(f"Strategy 1: Exact match with hyphenated name")
-                repo_name = search_variations[0]  # hyphenated version
-                user_query = f"repo:{username}/{repo_name}"
+                # Strategy 1: Try with user:username format (more reliable than repo:)
+                logger.info(f"Strategy 1: Search with 'user:<username> <name> in:name' format")
+                repo_name = search_variations[0]  # First variation (hyphenated/single word)
+                user_query = f"user:{username} {repo_name} in:name"
                 logger.info(f"→ Query: {user_query}")
 
                 repositories = await self.github_tool.search_repositories(
@@ -367,13 +400,14 @@ class SourceManager:
                 github_results = self.github_tool.extract_source_results(repositories)
 
                 if len(github_results) > 0:
-                    logger.info(f"✓ Found {len(github_results)} repo(s) with exact hyphenated match")
+                    logger.info(f"✓ Found {len(github_results)} repo(s) with user:username format")
                 else:
-                    # Strategy 2: Try with underscores
-                    logger.info(f"Strategy 2: Exact match with underscored name")
-                    repo_name = search_variations[1]  # underscored version
-                    user_query = f"repo:{username}/{repo_name}"
-                    logger.info(f"→ Query: {user_query}")
+                    # Strategy 2: Try with second variation
+                    logger.info(f"Strategy 2: Try second variation")
+                    if len(search_variations) > 1:
+                        repo_name = search_variations[1]
+                        user_query = f"user:{username} {repo_name} in:name"
+                        logger.info(f"→ Query: {user_query}")
 
                     repositories = await self.github_tool.search_repositories(
                         query=user_query,
