@@ -34,6 +34,7 @@ class CourseRequest(BaseModel):
     token_drive: str
     prompt: str
     files_url: str
+    cv: str
 
 class GitHubMCPRequest(BaseModel):
     token_github: str
